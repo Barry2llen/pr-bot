@@ -1,72 +1,96 @@
-# OpenAPI Template
+# PR Bot Worker
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/templates/tree/main/chanfana-openapi-template)
+Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, reads changed files, and creates or updates one PR conversation comment marked with `<!-- pr-bot-review -->`.
 
-![OpenAPI Template Preview](https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/91076b39-1f5b-46f6-7f14-536a6f183000/public)
+## GitHub App Setup
 
-<!-- dash-content-start -->
+Required repository permissions:
 
-This is a Cloudflare Worker with OpenAPI 3.1 Auto Generation and Validation using [chanfana](https://github.com/cloudflare/chanfana) and [Hono](https://github.com/honojs/hono).
+- Metadata: Read-only
+- Pull requests: Read & write
+- Contents: Read-only, optional but recommended
 
-This is an example project made to be used as a quick start into building OpenAPI compliant Workers that generates the
-`openapi.json` schema automatically from code and validates the incoming request to the defined parameters or request body.
+Subscribe to events:
 
-This template includes various endpoints, a D1 database, and integration tests using [Vitest](https://vitest.dev/) as examples. In endpoints, you will find [chanfana D1 AutoEndpoints](https://chanfana.com/endpoints/auto/d1) and a [normal endpoint](https://chanfana.com/endpoints/defining-endpoints) to serve as examples for your projects.
+- Pull request
 
-Besides being able to see the OpenAPI schema (openapi.json) in the browser, you can also extract the schema locally no hassle by running this command `npm run schema`.
+Set the GitHub App Webhook URL to:
 
-<!-- dash-content-end -->
-
-> [!IMPORTANT]
-> When using C3 to create this project, select "no" when it asks if you want to deploy. You need to follow this project's [setup steps](https://github.com/cloudflare/templates/tree/main/openapi-template#setup-steps) before deploying.
-
-## Getting Started
-
-Outside of this repo, you can start a new project with this template using [C3](https://developers.cloudflare.com/pages/get-started/c3/) (the `create-cloudflare` CLI):
-
-```bash
-npm create cloudflare@latest -- --template=cloudflare/templates/openapi-template
+```text
+https://<your-worker-domain>/webhook
 ```
 
-A live public deployment of this template is available at [https://openapi-template.templates.workers.dev](https://openapi-template.templates.workers.dev)
+## Local Development
 
-## Setup Steps
-
-1. Install the project dependencies with a package manager of your choice:
-   ```bash
-   npm install
-   ```
-2. Create a [D1 database](https://developers.cloudflare.com/d1/get-started/) with the name "openapi-template-db":
-   ```bash
-   npx wrangler d1 create openapi-template-db
-   ```
-   ...and update the `database_id` field in `wrangler.json` with the new database ID.
-3. Run the following db migration to initialize the database (notice the `migrations` directory in this project):
-   ```bash
-   npx wrangler d1 migrations apply DB --remote
-   ```
-4. Deploy the project!
-   ```bash
-   npx wrangler deploy
-   ```
-5. Monitor your worker
-   ```bash
-   npx wrangler tail
-   ```
-
-## Testing
-
-This template includes integration tests using [Vitest](https://vitest.dev/). To run the tests locally:
+Create local Worker variables:
 
 ```bash
-npm run test
+cp .dev.vars.example .dev.vars
 ```
 
-Test files are located in the `tests/` directory, with examples demonstrating how to test your endpoints and database interactions.
+Fill in `.dev.vars`:
 
-## Project structure
+```dotenv
+GITHUB_APP_ID=123456
+GITHUB_WEBHOOK_SECRET=replace_me
+GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+PORT=8787
+```
 
-1. Your main router is defined in `src/index.ts`.
-2. Each endpoint has its own file in `src/endpoints/`.
-3. Integration tests are located in the `tests/` directory.
-4. For more information read the [chanfana documentation](https://chanfana.com/), [Hono documentation](https://hono.dev/docs), and [Vitest documentation](https://vitest.dev/guide/).
+Install dependencies and start Wrangler:
+
+```bash
+npm install
+npm run dev
+```
+
+Wrangler loads `.dev.vars` automatically. `npm run dev` also reads `PORT` from `.dev.vars` and starts Wrangler with `--port <PORT>`. The Worker normalizes escaped newlines in `GITHUB_PRIVATE_KEY`, so a single-line PEM with `\n` works.
+
+## Deployment
+
+Configure production secrets:
+
+```bash
+npx wrangler secret put GITHUB_APP_ID
+npx wrangler secret put GITHUB_WEBHOOK_SECRET
+npx wrangler secret put GITHUB_PRIVATE_KEY
+```
+
+Deploy:
+
+```bash
+npm run deploy
+```
+
+After deployment, point the GitHub App Webhook URL to:
+
+```text
+https://<your-worker-domain>/webhook
+```
+
+## Verification
+
+1. Install the GitHub App to a test repository.
+2. Open a pull request, or push a new commit to an existing PR.
+3. Confirm the PR conversation contains or updates a `🤖 PR Bot` comment.
+4. Confirm the comment lists the changed files and the PR head SHA.
+
+Health check:
+
+```bash
+curl https://<your-worker-domain>/health
+```
+
+Expected response:
+
+```json
+{ "ok": true }
+```
+
+## Scripts
+
+```bash
+npm run typecheck
+npm run build
+npm test
+```

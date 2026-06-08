@@ -1,18 +1,10 @@
-import path from "node:path";
-import {
-	defineWorkersConfig,
-	readD1Migrations,
-} from "@cloudflare/vitest-pool-workers/config";
-
-const migrationsPath = path.join(__dirname, "..", "migrations");
-const migrations = await readD1Migrations(migrationsPath);
+import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
 	esbuild: {
 		target: "esnext",
 	},
 	test: {
-		setupFiles: ["./tests/apply-migrations.ts"],
 		poolOptions: {
 			workers: {
 				singleWorker: true,
@@ -20,9 +12,11 @@ export default defineWorkersConfig({
 					configPath: "../wrangler.jsonc",
 				},
 				miniflare: {
-					compatibilityFlags: ["experimental", "nodejs_compat"],
 					bindings: {
-						MIGRATIONS: migrations,
+						GITHUB_APP_ID: "123456",
+						GITHUB_WEBHOOK_SECRET: "test-secret",
+						GITHUB_PRIVATE_KEY:
+							"-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----",
 					},
 				},
 			},

@@ -6,7 +6,9 @@ declare namespace Cloudflare {
 		mainModule: typeof import("./src/index");
 	}
 	interface Env {
-		DB: D1Database;
+		GITHUB_APP_ID: string;
+		GITHUB_PRIVATE_KEY: string;
+		GITHUB_WEBHOOK_SECRET: string;
 	}
 }
 interface Env extends Cloudflare.Env {}

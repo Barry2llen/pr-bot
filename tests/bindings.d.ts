@@ -1,8 +1,7 @@
-import type { D1Migration } from "cloudflare:test";
-import type { Env as AppEnv } from "../src/bindings";
-
-export type Env = AppEnv & {
-	MIGRATIONS: D1Migration[];
+export type Env = {
+	GITHUB_APP_ID: string;
+	GITHUB_PRIVATE_KEY: string;
+	GITHUB_WEBHOOK_SECRET: string;
 };
 
 declare module "cloudflare:test" {

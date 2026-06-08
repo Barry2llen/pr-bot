@@ -1,24 +1,18 @@
 {
 	"name": "pr-bot",
-	"description": "Complete backend API template using Hono + Chanfana + D1 + Vitest.",
+	"description": "Cloudflare Worker GitHub App PR review bot MVP.",
 	"cloudflare": {
-		"label": "Backend OpenAPI Template",
+		"label": "PR Bot Worker",
 		"products": [
-			"Workers",
-			"D1"
+			"Workers"
 		],
 		"categories": [
-			"storage"
+			"developer-tools"
 		],
-		"docs_url": "https://chanfana.com",
-		"preview_icon_url": "https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/1b2805d9-e7fb-4576-5176-6b409e251800/public",
-		"preview_image_url": "https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/cbde46cf-20fa-4548-7f70-1ae8c2f48900/preview",
 		"publish": true
 	},
 	"dependencies": {
-		"chanfana": "2.8.3",
-		"hono": "4.11.1",
-		"zod": "3.25.67"
+		"hono": "4.11.1"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "0.11.1",
@@ -31,12 +25,11 @@
 	},
 	"private": true,
 	"scripts": {
+		"build": "wrangler deploy --dry-run",
 		"cf-typegen": "wrangler types",
 		"deploy": "wrangler deploy",
-		"dev": "pnpm seedLocalDb && wrangler dev",
-		"predeploy": "wrangler d1 migrations apply DB --remote",
-		"schema": "npx chanfana",
-		"seedLocalDb": "wrangler d1 migrations apply DB --local",
+		"dev": "node scripts/dev.mjs",
+		"typecheck": "tsc --noEmit",
 		"test": "wrangler deploy --dry-run && npx vitest run --config tests/vitest.config.mts"
 	}
 }
