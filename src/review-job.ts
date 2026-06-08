@@ -10,6 +10,14 @@ import {
 	listPullRequestFiles,
 	upsertPullRequestComment,
 } from "./github";
+import {
+	buildReviewStateKey,
+	getReviewState,
+	setReviewDone,
+	setReviewFailed,
+	setReviewProcessing,
+	type ReviewState,
+} from "./review-state";
 
 export type ReviewJob = {
 	installationId: number;
@@ -28,6 +36,10 @@ export type ReviewJobDependencies = {
 	generatePullRequestReview: typeof generatePullRequestReview;
 	upsertPullRequestComment: typeof upsertPullRequestComment;
 	buildReviewableDiff: typeof buildReviewableDiff;
+	getReviewState: typeof getReviewState;
+	setReviewProcessing: typeof setReviewProcessing;
+	setReviewDone: typeof setReviewDone;
+	setReviewFailed: typeof setReviewFailed;
 };
 
 const defaultDependencies: ReviewJobDependencies = {
@@ -37,7 +49,14 @@ const defaultDependencies: ReviewJobDependencies = {
 	generatePullRequestReview,
 	upsertPullRequestComment,
 	buildReviewableDiff,
+	getReviewState,
+	setReviewProcessing,
+	setReviewDone,
+	setReviewFailed,
 };
+
+const PROCESSING_STALE_AFTER_MS = 10 * 60 * 1000;
+const FAILED_SKIP_AFTER_MS = 2 * 60 * 1000;
 
 export async function processReviewJob(
 	job: ReviewJob,
@@ -63,6 +82,29 @@ export async function processReviewJob(
 		});
 		return;
 	}
+
+	const stateKey = buildReviewStateKey({
+		owner: job.owner,
+		repo: job.repo,
+		pullNumber: job.pullNumber,
+		headSha: job.headSha,
+	});
+	const reviewState = await deps.getReviewState(env, stateKey);
+	if (shouldSkipReviewState(reviewState, job)) {
+		return;
+	}
+
+	await deps.setReviewProcessing(env, stateKey, job);
+	await deps.upsertPullRequestComment({
+		token,
+		owner: job.owner,
+		repo: job.repo,
+		pullNumber: job.pullNumber,
+		body: buildProcessingReviewCommentBody({
+			pullNumber: job.pullNumber,
+			headSha: pullRequest.head.sha || job.headSha,
+		}),
+	});
 
 	const files = await deps.listPullRequestFiles(
 		token,
@@ -95,6 +137,7 @@ export async function processReviewJob(
 				review,
 			}),
 		});
+		await deps.setReviewDone(env, stateKey, job);
 	} catch (error) {
 		if (error instanceof DeepSeekError && !error.retryable) {
 			await deps.upsertPullRequestComment({
@@ -107,6 +150,12 @@ export async function processReviewJob(
 					pullRequest.head.sha || job.headSha,
 				),
 			});
+			await deps.setReviewFailed(
+				env,
+				stateKey,
+				job,
+				`DeepSeek API request failed with status ${error.status}`,
+			);
 			return;
 		}
 
@@ -130,6 +179,24 @@ export function buildAiReviewCommentBody(args: {
 		`- PR: #${pullNumber}`,
 		`- Head SHA: \`${headSha}\``,
 		`- Changed files: ${changedFileCount}`,
+		"- Status: `done`",
+	].join("\n");
+}
+
+function buildProcessingReviewCommentBody(args: {
+	pullNumber: number;
+	headSha: string;
+}): string {
+	return [
+		BOT_COMMENT_MARKER,
+		"## 🤖 AI PR Review",
+		"",
+		"AI review is processing...",
+		"",
+		"---",
+		`- PR: #${args.pullNumber}`,
+		`- Head SHA: \`${args.headSha}\``,
+		"- Status: `processing`",
 	].join("\n");
 }
 
@@ -141,10 +208,54 @@ function buildDeepSeekFailureCommentBody(
 		BOT_COMMENT_MARKER,
 		"## 🤖 AI PR Review",
 		"",
-		"AI 审查失败：配置、权限或余额问题。",
+		"AI review failed: configuration, permission, or balance issue.",
 		"",
 		"---",
 		`- PR: #${pullNumber}`,
 		`- Head SHA: \`${headSha}\``,
+		"- Status: `failed`",
 	].join("\n");
+}
+
+function shouldSkipReviewState(
+	state: ReviewState | undefined,
+	job: ReviewJob,
+): boolean {
+	if (!state) {
+		return false;
+	}
+
+	if (state.status === "done") {
+		console.log("Skip already reviewed head sha", safeReviewStateLog(job));
+		return true;
+	}
+
+	if (state.status === "processing") {
+		if (state.deliveryId && state.deliveryId === job.deliveryId) {
+			return false;
+		}
+
+		if (Date.now() - Date.parse(state.startedAt) < PROCESSING_STALE_AFTER_MS) {
+			console.log("Skip duplicate in-flight review job", safeReviewStateLog(job));
+			return true;
+		}
+		return false;
+	}
+
+	if (Date.now() - Date.parse(state.failedAt) < FAILED_SKIP_AFTER_MS) {
+		console.log("Skip recently failed review job", safeReviewStateLog(job));
+		return true;
+	}
+
+	return false;
+}
+
+function safeReviewStateLog(job: ReviewJob) {
+	return {
+		owner: job.owner,
+		repo: job.repo,
+		pullNumber: job.pullNumber,
+		headSha: job.headSha,
+		deliveryId: job.deliveryId,
+	};
 }

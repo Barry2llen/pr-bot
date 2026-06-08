@@ -25,10 +25,11 @@ export default defineWorkersConfig({
 					},
 					queueConsumers: {
 						"pr-bot-review": {
-							maxBatchSize: 10,
+							maxBatchSize: 1,
 							maxBatchTimeout: 5,
 						},
 					},
+					kvNamespaces: ["REVIEW_STATE"],
 				},
 			},
 		},
