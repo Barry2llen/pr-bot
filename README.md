@@ -98,7 +98,7 @@ preview_id = "replace_with_preview_kv_namespace_id"
 - Review body 包含高层总结和 metadata。
 - Inline comments 只会放在 diff 中可验证的新增行上。
 - 如果没有安全可靠的 inline comments，Bot 会提交只有 summary 的 review。
-- 现有普通 PR Conversation 评论仍用于显示 `processing` 或 `failed` 状态。
+- 现有普通 PR Conversation 评论仍用于显示 `processing` 或 `failed` 状态；`processing` 评论是临时反馈，成功创建 Pull Request Review 后会被删除。
 - 如果 GitHub 因行号或 diff 位置返回 `422`，Worker 会 fallback 到普通 marker 评论，避免 Queue 无限 retry。
 
 ## Review 状态和幂等
@@ -161,7 +161,7 @@ https://<your-worker-domain>/webhook
 3. 确认 webhook 请求返回 `202 accepted`。
 4. 确认 Queue consumer 没有无限 retry。
 5. 确认 PR Conversation 中先出现或更新 `processing` 状态评论。
-6. 确认完成后 GitHub PR Review 中出现英文 Markdown summary。
+6. 确认完成后 GitHub PR Review 中出现英文 Markdown summary，且临时 `processing` 普通评论被删除。
 7. 如果模型返回了可靠问题，确认 inline comments 落在具体 diff 新增行上。
 8. 如果没有可靠 inline comments，确认仍提交了 summary-only review。
 9. 再次更新 PR，确认同一个 head SHA 不会重复调用模型；新 head SHA 会触发新 review。

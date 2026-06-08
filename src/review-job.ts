@@ -13,6 +13,7 @@ import {
 	PullRequestReviewUnprocessableError,
 	createInstallationAccessToken,
 	createPullRequestReview,
+	deleteIssueComment,
 	getPullRequestMetadata,
 	listPullRequestFiles,
 	type PullRequestReviewComment,
@@ -44,6 +45,7 @@ export type ReviewJobDependencies = {
 	generatePullRequestReview: typeof generatePullRequestReview;
 	upsertPullRequestComment: typeof upsertPullRequestComment;
 	createPullRequestReview: typeof createPullRequestReview;
+	deleteIssueComment: typeof deleteIssueComment;
 	buildReviewableDiff: typeof buildReviewableDiff;
 	extractReviewableLines: typeof extractReviewableLines;
 	getReviewState: typeof getReviewState;
@@ -59,6 +61,7 @@ const defaultDependencies: ReviewJobDependencies = {
 	generatePullRequestReview,
 	upsertPullRequestComment,
 	createPullRequestReview,
+	deleteIssueComment,
 	buildReviewableDiff,
 	extractReviewableLines,
 	getReviewState,
@@ -107,7 +110,7 @@ export async function processReviewJob(
 	}
 
 	await deps.setReviewProcessing(env, stateKey, job);
-	await deps.upsertPullRequestComment({
+	const processingCommentId = await deps.upsertPullRequestComment({
 		token,
 		owner: job.owner,
 		repo: job.repo,
@@ -150,7 +153,7 @@ export async function processReviewJob(
 			review,
 		});
 
-		await createPullRequestReviewWithFallback({
+		const reviewCreated = await createPullRequestReviewWithFallback({
 			deps,
 			token,
 			owner: job.owner,
@@ -161,6 +164,14 @@ export async function processReviewJob(
 			comments: validatedComments,
 		});
 		await deps.setReviewDone(env, stateKey, job);
+		if (reviewCreated) {
+			await deps.deleteIssueComment({
+				token,
+				owner: job.owner,
+				repo: job.repo,
+				commentId: processingCommentId,
+			});
+		}
 	} catch (error) {
 		if (error instanceof DeepSeekError && !error.retryable) {
 			await deps.upsertPullRequestComment({
@@ -271,7 +282,7 @@ async function createPullRequestReviewWithFallback(args: {
 	commitId: string;
 	body: string;
 	comments: PullRequestReviewComment[];
-}): Promise<void> {
+}): Promise<boolean> {
 	const { deps, token, owner, repo, pullNumber, commitId, body, comments } = args;
 	try {
 		await deps.createPullRequestReview({
@@ -283,6 +294,7 @@ async function createPullRequestReviewWithFallback(args: {
 			body,
 			comments,
 		});
+		return true;
 	} catch (error) {
 		if (!(error instanceof PullRequestReviewUnprocessableError)) {
 			throw error;
@@ -295,6 +307,7 @@ async function createPullRequestReviewWithFallback(args: {
 			pullNumber,
 			body: [BOT_COMMENT_MARKER, body].join("\n"),
 		});
+		return false;
 	}
 }
 

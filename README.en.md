@@ -96,7 +96,7 @@ preview_id = "replace_with_preview_kv_namespace_id"
 - The review body contains high-level feedback and metadata.
 - Inline comments are only placed on added lines that are present in the diff.
 - If no safe inline comments are available, the bot submits a summary-only review.
-- The existing ordinary PR conversation comment may still be used for `processing` or `failed` status.
+- The existing ordinary PR conversation comment may still be used for `processing` or `failed` status. The `processing` comment is temporary and is deleted after the Pull Request Review is created successfully.
 - If GitHub returns `422` for review comment positioning, the Worker falls back to the ordinary marker comment to avoid infinite Queue retries.
 
 ## Review State and Idempotency
@@ -158,7 +158,7 @@ https://<your-worker-domain>/webhook
 3. Confirm the webhook request receives `202 accepted`.
 4. Confirm the queue consumer runs without retrying indefinitely.
 5. Confirm the PR conversation first contains or updates a `processing` status comment.
-6. Confirm a GitHub Pull Request Review appears with an English Markdown summary.
+6. Confirm a GitHub Pull Request Review appears with an English Markdown summary, and the temporary `processing` ordinary comment is deleted.
 7. If the model found reliable issues, confirm inline comments appear on specific added diff lines.
 8. If no reliable inline comments are available, confirm a summary-only review is still submitted.
 9. Update the PR again and confirm the same head SHA does not call the model again; a new head SHA triggers a new review.

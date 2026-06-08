@@ -9,6 +9,7 @@ import {
 import { extractReviewableLines } from "../../src/diff-lines";
 import {
 	createPullRequestReview,
+	deleteIssueComment,
 	githubRequest,
 	listPullRequestFiles,
 } from "../../src/github";
@@ -401,12 +402,16 @@ describe("PR bot worker", () => {
 						? "comment:processing"
 						: "comment:fallback",
 				);
+				return 101;
 			}),
 			createPullRequestReview: vi.fn(async () => {
 				calls.push("review");
 			}),
 			setReviewDone: vi.fn(async () => {
 				calls.push("done");
+			}),
+			deleteIssueComment: vi.fn(async () => {
+				calls.push("delete");
 			}),
 		});
 
@@ -418,6 +423,7 @@ describe("PR bot worker", () => {
 			"deepseek",
 			"review",
 			"done",
+			"delete",
 		]);
 	});
 
@@ -452,6 +458,12 @@ describe("PR bot worker", () => {
 			],
 		});
 		expect(deps.setReviewDone).toHaveBeenCalledTimes(1);
+		expect(deps.deleteIssueComment).toHaveBeenCalledWith({
+			token: "installation-token",
+			owner: "Barry2llen",
+			repo: "pr-bot",
+			commentId: 101,
+		});
 	});
 
 	it("falls back to the ordinary PR comment when GitHub rejects review comments with 422", async () => {
@@ -473,6 +485,7 @@ describe("PR bot worker", () => {
 				body: expect.stringContaining("<!-- pr-bot-review -->"),
 			}),
 		);
+		expect(deps.deleteIssueComment).not.toHaveBeenCalled();
 		expect(deps.setReviewDone).toHaveBeenCalledTimes(1);
 	});
 
@@ -562,6 +575,58 @@ describe("PR bot worker", () => {
 		expect(logged.body).toHaveLength(1000);
 		expect(logged.body).not.toBe(longBody);
 	});
+
+	it("deletes issue comments and treats 404 as already deleted", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(new Response(null, { status: 204 }))
+			.mockResolvedValueOnce(new Response("not found", { status: 404 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(
+			deleteIssueComment({
+				token: "token",
+				owner: "Barry2llen",
+				repo: "pr-bot",
+				commentId: 101,
+			}),
+		).resolves.toBeUndefined();
+		await expect(
+			deleteIssueComment({
+				token: "token",
+				owner: "Barry2llen",
+				repo: "pr-bot",
+				commentId: 101,
+			}),
+		).resolves.toBeUndefined();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0]?.[1]).toEqual(
+			expect.objectContaining({ method: "DELETE" }),
+		);
+	});
+
+	it("truncates delete issue comment error bodies before logging", async () => {
+		const longBody = "x".repeat(1500);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(longBody, { status: 500 })),
+		);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(
+			deleteIssueComment({
+				token: "token",
+				owner: "Barry2llen",
+				repo: "pr-bot",
+				commentId: 101,
+			}),
+		).rejects.toThrow("GitHub issue comment deletion failed");
+
+		const logged = errorSpy.mock.calls[0]?.[1] as { body?: string };
+		expect(logged.body).toHaveLength(1000);
+		expect(logged.body).not.toBe(longBody);
+	});
 });
 
 async function signBody(body: string, secret: string): Promise<string> {
@@ -643,8 +708,9 @@ function buildReviewJobDependencies(
 			},
 		]),
 		generatePullRequestReview: vi.fn(async () => buildEnglishReview()),
-		upsertPullRequestComment: vi.fn(async () => {}),
+		upsertPullRequestComment: vi.fn(async () => 101),
 		createPullRequestReview: vi.fn(async () => {}),
+		deleteIssueComment: vi.fn(async () => {}),
 		buildReviewableDiff: vi.fn(() => "@@ -0,0 +1,1 @@\n+export const ok = true;"),
 		extractReviewableLines: vi.fn(() => [
 			{ path: "src/index.ts", line: 1, content: "export const ok = true;" },
