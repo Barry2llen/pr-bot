@@ -21,24 +21,59 @@ export type ReviewJob = {
 	action: string;
 };
 
-export async function processReviewJob(job: ReviewJob, env: Env): Promise<void> {
-	const token = await createInstallationAccessToken(env, job.installationId);
-	const pullRequest = await getPullRequestMetadata(
+export type ReviewJobDependencies = {
+	createInstallationAccessToken: typeof createInstallationAccessToken;
+	getPullRequestMetadata: typeof getPullRequestMetadata;
+	listPullRequestFiles: typeof listPullRequestFiles;
+	generatePullRequestReview: typeof generatePullRequestReview;
+	upsertPullRequestComment: typeof upsertPullRequestComment;
+	buildReviewableDiff: typeof buildReviewableDiff;
+};
+
+const defaultDependencies: ReviewJobDependencies = {
+	createInstallationAccessToken,
+	getPullRequestMetadata,
+	listPullRequestFiles,
+	generatePullRequestReview,
+	upsertPullRequestComment,
+	buildReviewableDiff,
+};
+
+export async function processReviewJob(
+	job: ReviewJob,
+	env: Env,
+	deps: ReviewJobDependencies = defaultDependencies,
+): Promise<void> {
+	const token = await deps.createInstallationAccessToken(env, job.installationId);
+	const pullRequest = await deps.getPullRequestMetadata(
 		token,
 		job.owner,
 		job.repo,
 		job.pullNumber,
 	);
-	const files = await listPullRequestFiles(
+
+	if (pullRequest.head.sha && pullRequest.head.sha !== job.headSha) {
+		console.log("Skip stale review job", {
+			owner: job.owner,
+			repo: job.repo,
+			pullNumber: job.pullNumber,
+			jobHeadSha: job.headSha,
+			currentHeadSha: pullRequest.head.sha,
+			deliveryId: job.deliveryId,
+		});
+		return;
+	}
+
+	const files = await deps.listPullRequestFiles(
 		token,
 		job.owner,
 		job.repo,
 		job.pullNumber,
 	);
-	const diff = buildReviewableDiff(files);
+	const diff = deps.buildReviewableDiff(files);
 
 	try {
-		const review = await generatePullRequestReview({
+		const review = await deps.generatePullRequestReview({
 			env,
 			owner: job.owner,
 			repo: job.repo,
@@ -48,7 +83,7 @@ export async function processReviewJob(job: ReviewJob, env: Env): Promise<void> 
 			diff,
 		});
 
-		await upsertPullRequestComment({
+		await deps.upsertPullRequestComment({
 			token,
 			owner: job.owner,
 			repo: job.repo,
@@ -62,7 +97,7 @@ export async function processReviewJob(job: ReviewJob, env: Env): Promise<void> 
 		});
 	} catch (error) {
 		if (error instanceof DeepSeekError && !error.retryable) {
-			await upsertPullRequestComment({
+			await deps.upsertPullRequestComment({
 				token,
 				owner: job.owner,
 				repo: job.repo,

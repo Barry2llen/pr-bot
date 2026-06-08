@@ -67,11 +67,18 @@ queue = "pr-bot-review"
 
 [[queues.consumers]]
 queue = "pr-bot-review"
-max_batch_size = 10
+max_batch_size = 1
 max_batch_timeout = 5
 ```
 
 `POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, reads PR metadata and files, filters generated or unreviewable patches, calls DeepSeek with a non-streaming chat completions request, and upserts the PR comment.
+
+## Reliability Notes
+
+- Stale queue jobs are skipped when the current PR head SHA no longer matches the queued job head SHA.
+- PR changed files are fetched with pagination.
+- Very large diffs are truncated before sending to DeepSeek, and the review prompt includes a truncation notice.
+- Queue batch size is set to 1 for safer AI review processing.
 
 ## Deployment
 
@@ -106,7 +113,7 @@ https://<your-worker-domain>/webhook
 3. Confirm the webhook request receives `202 accepted`.
 4. Confirm the queue consumer runs without retrying indefinitely.
 5. Confirm the PR conversation contains or updates a `🤖 AI PR Review` comment.
-6. Confirm the comment includes Chinese Markdown sections: `总结`, `需要关注的问题`, `建议`, and `结论`.
+6. Confirm the comment includes English Markdown sections: `Summary`, `Issues to Watch`, `Suggestions`, and `Conclusion`.
 7. Update the PR again and confirm the same marked comment is updated instead of creating duplicate comments.
 
 Health check:

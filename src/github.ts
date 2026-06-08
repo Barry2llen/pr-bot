@@ -21,6 +21,8 @@ type GitHubComment = {
 };
 
 const GITHUB_API_BASE = "https://api.github.com";
+const MAX_LOG_BODY_CHARS = 1000;
+const MAX_PR_FILE_PAGES = 10;
 export const BOT_COMMENT_MARKER = "<!-- pr-bot-review -->";
 
 export async function createInstallationAccessToken(
@@ -45,7 +47,7 @@ export async function createInstallationAccessToken(
 		const body = await response.text();
 		console.error("GitHub installation token request failed", {
 			status: response.status,
-			body,
+			body: truncateLogBody(body),
 		});
 		throw new Error("GitHub installation token request failed");
 	}
@@ -79,7 +81,7 @@ export async function githubRequest<T>(
 		const body = await response.text();
 		console.error("GitHub API request failed", {
 			status: response.status,
-			body,
+			body: truncateLogBody(body),
 			path,
 		});
 		throw new Error("GitHub API request failed");
@@ -98,10 +100,28 @@ export async function listPullRequestFiles(
 	repo: string,
 	pullNumber: number,
 ): Promise<PullRequestFile[]> {
-	return githubRequest<PullRequestFile[]>(
-		token,
-		`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/files?per_page=100`,
-	);
+	const files: PullRequestFile[] = [];
+	const basePath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/files`;
+
+	for (let page = 1; page <= MAX_PR_FILE_PAGES; page += 1) {
+		const batch = await githubRequest<PullRequestFile[]>(
+			token,
+			`${basePath}?per_page=100&page=${page}`,
+		);
+		files.push(...batch);
+
+		if (batch.length < 100) {
+			return files;
+		}
+	}
+
+	console.warn("PR files were truncated by pagination limit", {
+		owner,
+		repo,
+		pullNumber,
+		maxPages: MAX_PR_FILE_PAGES,
+	});
+	return files;
 }
 
 export async function getPullRequestMetadata(
@@ -297,4 +317,8 @@ function base64UrlEncodeBytes(bytes: Uint8Array): string {
 	}
 
 	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function truncateLogBody(body: string): string {
+	return body.slice(0, MAX_LOG_BODY_CHARS);
 }

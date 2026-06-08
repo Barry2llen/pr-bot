@@ -3,6 +3,9 @@ import type { PullRequestFile, PullRequestMetadata } from "./github";
 const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
 const MAX_DIFF_CHARS = 60_000;
+const MAX_LOG_BODY_CHARS = 1000;
+export const DIFF_TRUNCATED_NOTICE =
+	"[Diff truncated: this review only covers the included portion of the PR.]";
 
 type DeepSeekChoice = {
 	message?: {
@@ -47,11 +50,11 @@ export async function generatePullRequestReview(args: {
 				{
 					role: "system",
 					content: [
-						"你是一个严谨的 GitHub Pull Request 代码审查机器人。",
-						"只基于用户提供的 PR metadata 和 diff 审查，不要编造 diff 中不存在的问题。",
-						"用中文输出 Markdown，并必须包含这些章节：## 🤖 AI PR Review、### 总结、### 需要关注的问题、### 建议、### 结论。",
-						"如果没有发现明显问题，必须明确写“没有发现明显问题”。",
-						"优先指出正确性、安全性、并发、边界条件、可维护性问题；不要做泛泛而谈的风格建议。",
+						"You are a rigorous GitHub Pull Request code review bot.",
+						"Review only the PR metadata and diff provided by the user. Do not invent issues that are not present in the diff.",
+						"Write the review in English Markdown and include these exact sections: ## 🤖 AI PR Review, ### Summary, ### Issues to Watch, ### Suggestions, ### Conclusion.",
+						"If there are no obvious issues, explicitly write: No obvious issues found.",
+						"Prioritize correctness, security, concurrency, edge cases, and maintainability. Avoid generic style-only suggestions.",
 					].join("\n"),
 				},
 				{
@@ -77,7 +80,7 @@ export async function generatePullRequestReview(args: {
 		const body = await response.text();
 		console.error("DeepSeek API request failed", {
 			status: response.status,
-			body,
+			body: body.slice(0, MAX_LOG_BODY_CHARS),
 		});
 		throw new DeepSeekError(
 			"DeepSeek API request failed",
@@ -99,6 +102,7 @@ export async function generatePullRequestReview(args: {
 export function buildReviewableDiff(files: PullRequestFile[]): string {
 	let remaining = MAX_DIFF_CHARS;
 	const chunks: string[] = [];
+	let truncated = false;
 
 	for (const file of files) {
 		if (!shouldReviewFile(file)) {
@@ -113,11 +117,16 @@ export function buildReviewableDiff(files: PullRequestFile[]): string {
 		const chunk = `${header}${file.patch}`;
 		if (chunk.length > remaining) {
 			chunks.push(chunk.slice(0, Math.max(0, remaining)));
+			truncated = true;
 			break;
 		}
 
 		chunks.push(chunk);
 		remaining -= chunk.length;
+	}
+
+	if (truncated) {
+		chunks.push(DIFF_TRUNCATED_NOTICE);
 	}
 
 	return chunks.join("\n\n");
@@ -133,7 +142,9 @@ function buildReviewPrompt(args: {
 }): string {
 	const { owner, repo, pullNumber, pullRequest, files, diff } = args;
 	const body = pullRequest.body?.trim() || "(empty)";
-	const reviewableDiff = diff.trim() || "(没有可审查的 patch，可能全部是 lock/dist/build/coverage/minified/source map 或二进制文件。)";
+	const reviewableDiff =
+		diff.trim() ||
+		"(No reviewable patch is available. The PR may only contain lock files, dist/build/coverage output, minified files, source maps, or binary files.)";
 
 	return [
 		`Repository: ${owner}/${repo}`,
@@ -143,7 +154,7 @@ function buildReviewPrompt(args: {
 		`Head SHA: ${pullRequest.head.sha}`,
 		`Changed files: ${files.length}`,
 		"",
-		"请审查下面的 diff：",
+		"Please review the following diff:",
 		"",
 		reviewableDiff,
 	].join("\n");
