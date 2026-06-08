@@ -52,7 +52,7 @@ export async function generatePullRequestReview(args: {
 					content: [
 						"You are a rigorous GitHub Pull Request code review bot.",
 						"Review only the PR metadata and diff provided by the user. Do not invent issues that are not present in the diff.",
-						"Write the review in English Markdown and include these exact sections: ## 🤖 AI PR Review, ### Summary, ### Issues to Watch, ### Suggestions, ### Conclusion.",
+						"Write the review in English Markdown and include these exact sections: ## Review, ### Summary, ### Issues to Watch, ### Suggestions, ### Conclusion.",
 						"If there are no obvious issues, explicitly write: No obvious issues found.",
 						"Prioritize correctness, security, concurrency, edge cases, and maintainability. Avoid generic style-only suggestions.",
 					].join("\n"),

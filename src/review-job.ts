@@ -189,7 +189,7 @@ function buildProcessingReviewCommentBody(args: {
 }): string {
 	return [
 		BOT_COMMENT_MARKER,
-		"## 🤖 AI PR Review",
+		"## Review",
 		"",
 		"AI review is processing...",
 		"",
@@ -206,7 +206,7 @@ function buildDeepSeekFailureCommentBody(
 ): string {
 	return [
 		BOT_COMMENT_MARKER,
-		"## 🤖 AI PR Review",
+		"## Review",
 		"",
 		"AI review failed: configuration, permission, or balance issue.",
 		"",
