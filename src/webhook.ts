@@ -1,9 +1,5 @@
 import type { Context } from "hono";
-import {
-	createInstallationAccessToken,
-	listPullRequestFiles,
-	upsertPullRequestComment,
-} from "./github";
+import type { ReviewJob } from "./review-job";
 
 const ACCEPTED_PULL_REQUEST_ACTIONS = new Set([
 	"opened",
@@ -72,25 +68,12 @@ export async function handleGitHubWebhook(c: GitHubWebhookContext) {
 		return c.text("ignored", 202);
 	}
 
-	const token = await createInstallationAccessToken(
-		c.env,
-		details.installationId,
-	);
-	const files = await listPullRequestFiles(
-		token,
-		details.owner,
-		details.repo,
-		details.pullNumber,
-	);
-
-	await upsertPullRequestComment({
-		token,
-		owner: details.owner,
-		repo: details.repo,
-		pullNumber: details.pullNumber,
-		headSha: details.headSha,
-		files,
-	});
+	const job: ReviewJob = {
+		...details,
+		deliveryId: delivery,
+		action: payload.action ?? "unknown",
+	};
+	await c.env.REVIEW_QUEUE.send(job);
 
 	return c.text("accepted", 202);
 }

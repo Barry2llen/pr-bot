@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { handleGitHubWebhook } from "../../src/webhook";
 
 describe("PR bot worker", () => {
 	it("returns health status", async () => {
@@ -33,6 +34,60 @@ describe("PR bot worker", () => {
 
 		expect(response.status).toBe(202);
 		expect(await response.text()).toBe("ignored");
+	});
+
+	it("enqueues accepted pull_request events", async () => {
+		const body = JSON.stringify({
+			action: "opened",
+			installation: { id: 42 },
+			repository: {
+				name: "pr-bot",
+				owner: { login: "Barry2llen" },
+			},
+			pull_request: {
+				number: 7,
+				draft: false,
+				head: { sha: "abc123" },
+			},
+		});
+		const signature = await signBody(body, "test-secret");
+		const sentJobs: unknown[] = [];
+		const response = await handleGitHubWebhook({
+			req: {
+				header: (name: string) =>
+					({
+						"x-github-event": "pull_request",
+						"x-github-delivery": "delivery-id",
+						"x-hub-signature-256": signature,
+					})[name.toLowerCase()],
+				raw: {
+					text: async () => body,
+				},
+			},
+			env: {
+				GITHUB_WEBHOOK_SECRET: "test-secret",
+				REVIEW_QUEUE: {
+					send: async (job: unknown) => {
+						sentJobs.push(job);
+					},
+				},
+			},
+			text: (text: string, status: number) => new Response(text, { status }),
+		} as never);
+
+		expect(response.status).toBe(202);
+		expect(await response.text()).toBe("accepted");
+		expect(sentJobs).toEqual([
+			{
+				installationId: 42,
+				owner: "Barry2llen",
+				repo: "pr-bot",
+				pullNumber: 7,
+				headSha: "abc123",
+				deliveryId: "delivery-id",
+				action: "opened",
+			},
+		]);
 	});
 });
 
