@@ -20,10 +20,24 @@ type GitHubComment = {
 	body?: string;
 };
 
+export type PullRequestReviewComment = {
+	path: string;
+	line: number;
+	side: "RIGHT";
+	body: string;
+};
+
 const GITHUB_API_BASE = "https://api.github.com";
 const MAX_LOG_BODY_CHARS = 1000;
 const MAX_PR_FILE_PAGES = 10;
 export const BOT_COMMENT_MARKER = "<!-- pr-bot-review -->";
+
+export class PullRequestReviewUnprocessableError extends Error {
+	constructor() {
+		super("GitHub pull request review could not be created");
+		this.name = "PullRequestReviewUnprocessableError";
+	}
+}
 
 export async function createInstallationAccessToken(
 	env: Env,
@@ -171,6 +185,50 @@ export async function upsertPullRequestComment(args: {
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ body }),
 	});
+}
+
+export async function createPullRequestReview(args: {
+	token: string;
+	owner: string;
+	repo: string;
+	pullNumber: number;
+	commitId: string;
+	body: string;
+	comments: PullRequestReviewComment[];
+}): Promise<void> {
+	const { token, owner, repo, pullNumber, commitId, body, comments } = args;
+	const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}/reviews`;
+	const response = await fetch(`${GITHUB_API_BASE}${path}`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${token}`,
+			Accept: "application/vnd.github+json",
+			"X-GitHub-Api-Version": "2022-11-28",
+			"User-Agent": "pr-bot-worker",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			commit_id: commitId,
+			body,
+			event: "COMMENT",
+			comments,
+		}),
+	});
+
+	if (!response.ok) {
+		const responseBody = await response.text();
+		console.error("GitHub pull request review creation failed", {
+			status: response.status,
+			body: truncateLogBody(responseBody),
+			path,
+		});
+
+		if (response.status === 422) {
+			throw new PullRequestReviewUnprocessableError();
+		}
+
+		throw new Error("GitHub pull request review creation failed");
+	}
 }
 
 export function buildPullRequestReceivedCommentBody(

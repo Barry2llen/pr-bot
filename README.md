@@ -2,7 +2,7 @@
 
 [English README](./README.en.md)
 
-这是一个运行在 Cloudflare Workers 上的 GitHub App PR 审查机器人。它接收 GitHub `pull_request` webhook，验证 webhook 签名，把审查任务发送到 Cloudflare Queues，并由 Queue consumer 调用 DeepSeek 生成英文 Markdown PR Review。机器人只会在 PR Conversation 里创建或更新一条带有 `<!-- pr-bot-review -->` marker 的普通评论，不做行内评论、Check Run 或 request changes。
+这是一个运行在 Cloudflare Workers 上的 GitHub App PR 审查机器人。它接收 GitHub `pull_request` webhook，验证 webhook 签名，把审查任务发送到 Cloudflare Queues，并由 Queue consumer 调用 DeepSeek 生成英文 Pull Request Review。完成后机器人会提交 GitHub Pull Request Review：review body 放总体总结，可靠的 review comments 会落到具体 diff 新增行上。processing / failed 状态仍使用带有 `<!-- pr-bot-review -->` marker 的普通 PR Conversation 评论。不做 Check Run、自动 request changes 或自动 resolve thread。
 
 ## GitHub App 配置
 
@@ -90,7 +90,16 @@ id = "replace_with_production_kv_namespace_id"
 preview_id = "replace_with_preview_kv_namespace_id"
 ```
 
-`POST /webhook` 只负责验签、过滤 GitHub webhook，并把 `ReviewJob` 发送到 `REVIEW_QUEUE`。Queue consumer 会获取 GitHub App installation token，读取 PR metadata 和 changed files，过滤生成文件或不可审查 patch，调用 DeepSeek 的非流式 chat completions API，然后 upsert 同一条 PR 评论。
+`POST /webhook` 只负责验签、过滤 GitHub webhook，并把 `ReviewJob` 发送到 `REVIEW_QUEUE`。Queue consumer 会获取 GitHub App installation token，读取 PR metadata 和 changed files，过滤生成文件或不可审查 patch，调用 DeepSeek 的非流式 chat completions API，然后创建 Pull Request Review。
+
+## Pull Request Review 模式
+
+- Bot 会提交 GitHub Pull Request Review，而不是只更新普通 PR Conversation 评论。
+- Review body 包含高层总结和 metadata。
+- Inline comments 只会放在 diff 中可验证的新增行上。
+- 如果没有安全可靠的 inline comments，Bot 会提交只有 summary 的 review。
+- 现有普通 PR Conversation 评论仍用于显示 `processing` 或 `failed` 状态。
+- 如果 GitHub 因行号或 diff 位置返回 `422`，Worker 会 fallback 到普通 marker 评论，避免 Queue 无限 retry。
 
 ## Review 状态和幂等
 
@@ -151,9 +160,11 @@ https://<your-worker-domain>/webhook
 2. 打开一个 PR，或给已有 PR 推送新 commit。
 3. 确认 webhook 请求返回 `202 accepted`。
 4. 确认 Queue consumer 没有无限 retry。
-5. 确认 PR Conversation 中出现或更新 `Review` 评论。
-6. 确认评论包含英文 Markdown sections：`Summary`、`Issues to Watch`、`Suggestions`、`Conclusion`。
-7. 再次更新 PR，确认同一条 marker 评论被更新，而不是创建重复评论。
+5. 确认 PR Conversation 中先出现或更新 `processing` 状态评论。
+6. 确认完成后 GitHub PR Review 中出现英文 Markdown summary。
+7. 如果模型返回了可靠问题，确认 inline comments 落在具体 diff 新增行上。
+8. 如果没有可靠 inline comments，确认仍提交了 summary-only review。
+9. 再次更新 PR，确认同一个 head SHA 不会重复调用模型；新 head SHA 会触发新 review。
 
 健康检查：
 

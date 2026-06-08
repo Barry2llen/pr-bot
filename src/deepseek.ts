@@ -1,9 +1,14 @@
+import type { ReviewableLine } from "./diff-lines";
 import type { PullRequestFile, PullRequestMetadata } from "./github";
 
 const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
 const MAX_DIFF_CHARS = 60_000;
 const MAX_LOG_BODY_CHARS = 1000;
+const MAX_REVIEWABLE_LINES_FOR_PROMPT = 300;
+const MAX_REVIEWABLE_LINE_CONTENT_CHARS = 160;
+const MAX_AI_COMMENTS = 5;
+const MAX_AI_COMMENT_BODY_CHARS = 2000;
 export const DIFF_TRUNCATED_NOTICE =
 	"[Diff truncated: this review only covers the included portion of the PR.]";
 
@@ -15,6 +20,16 @@ type DeepSeekChoice = {
 
 type DeepSeekResponse = {
 	choices?: DeepSeekChoice[];
+};
+
+export type AiReviewResult = {
+	summaryMarkdown: string;
+	comments: Array<{
+		path: string;
+		line: number;
+		body: string;
+		severity?: "low" | "medium" | "high";
+	}>;
 };
 
 export class DeepSeekError extends Error {
@@ -36,8 +51,10 @@ export async function generatePullRequestReview(args: {
 	pullRequest: PullRequestMetadata;
 	files: PullRequestFile[];
 	diff: string;
-}): Promise<string> {
-	const { env, owner, repo, pullNumber, pullRequest, files, diff } = args;
+	reviewableLines: ReviewableLine[];
+}): Promise<AiReviewResult> {
+	const { env, owner, repo, pullNumber, pullRequest, files, diff, reviewableLines } =
+		args;
 	const response = await fetch(DEEPSEEK_API_URL, {
 		method: "POST",
 		headers: {
@@ -50,11 +67,16 @@ export async function generatePullRequestReview(args: {
 				{
 					role: "system",
 					content: [
-						"You are a rigorous GitHub Pull Request code review bot.",
-						"Review only the PR metadata and diff provided by the user. Do not invent issues that are not present in the diff.",
-						"Write the review in English Markdown and include these exact sections: ## Review, ### Summary, ### Issues to Watch, ### Suggestions, ### Conclusion.",
+						"You are a PR review bot.",
+						"Review only the PR metadata, diff, and REVIEWABLE_LINES provided by the user.",
+						"Only create inline comments for lines listed in REVIEWABLE_LINES.",
+						"Do not invent line numbers, files, or issues that are not present in the diff.",
+						"If there is no concrete issue, return comments: [].",
+						"Return at most 5 comments.",
+						"Write summaryMarkdown in English Markdown and include these exact sections: ## Review, ### Summary, ### Issues to Watch, ### Suggestions, ### Conclusion.",
 						"If there are no obvious issues, explicitly write: No obvious issues found.",
 						"Prioritize correctness, security, concurrency, edge cases, and maintainability. Avoid generic style-only suggestions.",
+						"Output valid JSON only. Do not wrap the response in markdown fences.",
 					].join("\n"),
 				},
 				{
@@ -66,6 +88,7 @@ export async function generatePullRequestReview(args: {
 						pullRequest,
 						files,
 						diff,
+						reviewableLines,
 					}),
 				},
 			],
@@ -93,10 +116,43 @@ export async function generatePullRequestReview(args: {
 	const content = body.choices?.[0]?.message?.content?.trim();
 	if (!content) {
 		console.error("DeepSeek API response did not include review content");
-		throw new Error("DeepSeek API response was invalid");
+		throw new DeepSeekError("DeepSeek API response was invalid", 200, false);
 	}
 
-	return content;
+	return parseAiReviewResult(content);
+}
+
+export function parseAiReviewResult(text: string): AiReviewResult {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stripJsonFence(text));
+	} catch {
+		throw new DeepSeekError("DeepSeek API response was not valid JSON", 200, false);
+	}
+
+	if (!parsed || typeof parsed !== "object") {
+		return {
+			summaryMarkdown: "## Review\n\nNo summary returned.",
+			comments: [],
+		};
+	}
+
+	const value = parsed as {
+		summaryMarkdown?: unknown;
+		comments?: unknown;
+	};
+	const summaryMarkdown =
+		typeof value.summaryMarkdown === "string"
+			? value.summaryMarkdown
+			: "## Review\n\nNo summary returned.";
+	const comments = Array.isArray(value.comments)
+		? value.comments.flatMap((comment) => sanitizeAiComment(comment))
+		: [];
+
+	return {
+		summaryMarkdown,
+		comments: comments.slice(0, MAX_AI_COMMENTS),
+	};
 }
 
 export function buildReviewableDiff(files: PullRequestFile[]): string {
@@ -139,12 +195,15 @@ function buildReviewPrompt(args: {
 	pullRequest: PullRequestMetadata;
 	files: PullRequestFile[];
 	diff: string;
+	reviewableLines: ReviewableLine[];
 }): string {
-	const { owner, repo, pullNumber, pullRequest, files, diff } = args;
+	const { owner, repo, pullNumber, pullRequest, files, diff, reviewableLines } =
+		args;
 	const body = pullRequest.body?.trim() || "(empty)";
 	const reviewableDiff =
 		diff.trim() ||
 		"(No reviewable patch is available. The PR may only contain lock files, dist/build/coverage output, minified files, source maps, or binary files.)";
+	const reviewableLineText = buildReviewableLinePrompt(reviewableLines);
 
 	return [
 		`Repository: ${owner}/${repo}`,
@@ -157,7 +216,75 @@ function buildReviewPrompt(args: {
 		"Please review the following diff:",
 		"",
 		reviewableDiff,
+		"",
+		"REVIEWABLE_LINES:",
+		reviewableLineText,
 	].join("\n");
+}
+
+function buildReviewableLinePrompt(reviewableLines: ReviewableLine[]): string {
+	if (reviewableLines.length === 0) {
+		return "(none)";
+	}
+
+	return reviewableLines
+		.slice(0, MAX_REVIEWABLE_LINES_FOR_PROMPT)
+		.map((line) => {
+			const content =
+				line.content.length > MAX_REVIEWABLE_LINE_CONTENT_CHARS
+					? `${line.content.slice(0, MAX_REVIEWABLE_LINE_CONTENT_CHARS)}...`
+					: line.content;
+			return `- ${line.path}:${line.line} | ${content}`;
+		})
+		.join("\n");
+}
+
+function stripJsonFence(text: string): string {
+	const trimmed = text.trim();
+	const match = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+	return match ? match[1].trim() : trimmed;
+}
+
+function sanitizeAiComment(comment: unknown): AiReviewResult["comments"] {
+	if (!comment || typeof comment !== "object") {
+		return [];
+	}
+
+	const value = comment as {
+		path?: unknown;
+		line?: unknown;
+		body?: unknown;
+		severity?: unknown;
+	};
+	if (
+		typeof value.path !== "string" ||
+		typeof value.line !== "number" ||
+		!Number.isInteger(value.line) ||
+		typeof value.body !== "string"
+	) {
+		return [];
+	}
+
+	const body = value.body.trim();
+	if (!body) {
+		return [];
+	}
+
+	const result: AiReviewResult["comments"][number] = {
+		path: value.path,
+		line: value.line,
+		body: body.slice(0, MAX_AI_COMMENT_BODY_CHARS),
+	};
+
+	if (
+		value.severity === "low" ||
+		value.severity === "medium" ||
+		value.severity === "high"
+	) {
+		result.severity = value.severity;
+	}
+
+	return [result];
 }
 
 function shouldReviewFile(file: PullRequestFile): boolean {

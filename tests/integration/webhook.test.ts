@@ -4,11 +4,18 @@ import {
 	DIFF_TRUNCATED_NOTICE,
 	DeepSeekError,
 	buildReviewableDiff,
+	parseAiReviewResult,
 } from "../../src/deepseek";
-import { githubRequest, listPullRequestFiles } from "../../src/github";
+import { extractReviewableLines } from "../../src/diff-lines";
+import {
+	createPullRequestReview,
+	githubRequest,
+	listPullRequestFiles,
+} from "../../src/github";
 import {
 	buildAiReviewCommentBody,
 	processReviewJob,
+	validateReviewComments,
 	type ReviewJobDependencies,
 } from "../../src/review-job";
 import { handleGitHubWebhook } from "../../src/webhook";
@@ -130,6 +137,69 @@ describe("PR bot worker", () => {
 		expect(body).toContain("- Status: `done`");
 	});
 
+	it("parses AI review JSON and fenced JSON", () => {
+		const plain = parseAiReviewResult(
+			JSON.stringify({
+				summaryMarkdown: "## Review\n\nNo obvious issues found.",
+				comments: [
+					{
+						path: "src/index.ts",
+						line: 3,
+						severity: "medium",
+						body: "Guard this before use.",
+					},
+				],
+			}),
+		);
+		const fenced = parseAiReviewResult(
+			[
+				"```json",
+				JSON.stringify({
+					summaryMarkdown: "## Review",
+					comments: [{ path: "src/a.ts", line: 1, body: "Check this." }],
+				}),
+				"```",
+			].join("\n"),
+		);
+
+		expect(plain.comments).toEqual([
+			{
+				path: "src/index.ts",
+				line: 3,
+				severity: "medium",
+				body: "Guard this before use.",
+			},
+		]);
+		expect(fenced.summaryMarkdown).toBe("## Review");
+	});
+
+	it("drops invalid AI review comments and caps the result at five", () => {
+		const result = parseAiReviewResult(
+			JSON.stringify({
+				summaryMarkdown: "## Review",
+				comments: [
+					{ path: "src/a.ts", line: 1, body: "one" },
+					{ path: "src/a.ts", line: "2", body: "invalid line" },
+					{ path: "src/a.ts", line: 2, body: "" },
+					{ path: "src/a.ts", line: 2, body: "two" },
+					{ path: "src/a.ts", line: 3, body: "three" },
+					{ path: "src/a.ts", line: 4, body: "four" },
+					{ path: "src/a.ts", line: 5, body: "five" },
+					{ path: "src/a.ts", line: 6, body: "six" },
+				],
+			}),
+		);
+
+		expect(result.comments).toHaveLength(5);
+		expect(result.comments.map((comment) => comment.body)).toEqual([
+			"one",
+			"two",
+			"three",
+			"four",
+			"five",
+		]);
+	});
+
 	it("skips unreviewable files when building diff", () => {
 		const diff = buildReviewableDiff([
 			{
@@ -163,12 +233,63 @@ describe("PR bot worker", () => {
 		expect(diff).not.toContain("dist/app.js");
 	});
 
+	it("extracts reviewable added lines from patch hunks", () => {
+		const lines = extractReviewableLines([
+			{
+				filename: "src/index.ts",
+				status: "modified",
+				additions: 2,
+				deletions: 1,
+				changes: 3,
+				patch: [
+					"@@ -1,3 +1,4 @@",
+					" context",
+					"+added line",
+					"-old line",
+					" another context",
+					"+second added line",
+				].join("\n"),
+			},
+		]);
+
+		expect(lines).toEqual([
+			{ path: "src/index.ts", line: 2, content: "added line" },
+			{ path: "src/index.ts", line: 4, content: "second added line" },
+		]);
+	});
+
+	it("validates inline review comments against reviewable lines", () => {
+		const comments = validateReviewComments(
+			[
+				{ path: "src/index.ts", line: 2, body: " first " },
+				{ path: "src/index.ts", line: 2, body: "duplicate" },
+				{ path: "src/index.ts", line: 99, body: "bad line" },
+				{ path: "src/other.ts", line: 1, body: "bad path" },
+				{ path: "src/index.ts", line: 4, body: "x".repeat(2500) },
+			],
+			[
+				{ path: "src/index.ts", line: 2, content: "added line" },
+				{ path: "src/index.ts", line: 4, content: "second added line" },
+			],
+		);
+
+		expect(comments).toEqual([
+			{ path: "src/index.ts", line: 2, side: "RIGHT", body: "first" },
+			{
+				path: "src/index.ts",
+				line: 4,
+				side: "RIGHT",
+				body: "x".repeat(2000),
+			},
+		]);
+	});
+
 	it("skips stale review jobs without reading files or updating comments", async () => {
 		const listPullRequestFilesMock = vi.fn();
 		const generatePullRequestReviewMock = vi.fn();
 		const upsertPullRequestCommentMock = vi.fn();
-		const deps = {
-			createInstallationAccessToken: vi.fn(async () => "installation-token"),
+		const createPullRequestReviewMock = vi.fn();
+		const deps = buildReviewJobDependencies({
 			getPullRequestMetadata: vi.fn(async () => ({
 				title: "Fresh PR",
 				body: null,
@@ -177,8 +298,8 @@ describe("PR bot worker", () => {
 			listPullRequestFiles: listPullRequestFilesMock,
 			generatePullRequestReview: generatePullRequestReviewMock,
 			upsertPullRequestComment: upsertPullRequestCommentMock,
-			buildReviewableDiff: vi.fn(),
-		} satisfies ReviewJobDependencies;
+			createPullRequestReview: createPullRequestReviewMock,
+		});
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		await processReviewJob(
@@ -206,6 +327,7 @@ describe("PR bot worker", () => {
 		expect(listPullRequestFilesMock).not.toHaveBeenCalled();
 		expect(generatePullRequestReviewMock).not.toHaveBeenCalled();
 		expect(upsertPullRequestCommentMock).not.toHaveBeenCalled();
+		expect(createPullRequestReviewMock).not.toHaveBeenCalled();
 	});
 
 	it("skips review jobs that already have done state", async () => {
@@ -263,7 +385,7 @@ describe("PR bot worker", () => {
 		expect(deps.generatePullRequestReview).toHaveBeenCalledTimes(1);
 	});
 
-	it("writes processing before DeepSeek and done after updating the comment", async () => {
+	it("writes processing before DeepSeek and done after creating a pull request review", async () => {
 		const calls: string[] = [];
 		const deps = buildReviewJobDependencies({
 			setReviewProcessing: vi.fn(async () => {
@@ -274,7 +396,14 @@ describe("PR bot worker", () => {
 				return buildEnglishReview();
 			}),
 			upsertPullRequestComment: vi.fn(async ({ body }) => {
-				calls.push(body.includes("Status: `processing`") ? "comment:processing" : "comment:done");
+				calls.push(
+					body.includes("Status: `processing`")
+						? "comment:processing"
+						: "comment:fallback",
+				);
+			}),
+			createPullRequestReview: vi.fn(async () => {
+				calls.push("review");
 			}),
 			setReviewDone: vi.fn(async () => {
 				calls.push("done");
@@ -287,9 +416,64 @@ describe("PR bot worker", () => {
 			"processing",
 			"comment:processing",
 			"deepseek",
-			"comment:done",
+			"review",
 			"done",
 		]);
+	});
+
+	it("creates pull request reviews with the current head sha and validated comments", async () => {
+		const deps = buildReviewJobDependencies({
+			generatePullRequestReview: vi.fn(async () => ({
+				summaryMarkdown: "## Review\n\n### Summary\nCheck the null handling.",
+				comments: [
+					{ path: "src/index.ts", line: 1, body: "Valid inline comment." },
+					{ path: "src/index.ts", line: 99, body: "Invalid line." },
+				],
+			})),
+			createPullRequestReview: vi.fn(async () => {}),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(deps.createPullRequestReview).toHaveBeenCalledWith({
+			token: "installation-token",
+			owner: "Barry2llen",
+			repo: "pr-bot",
+			pullNumber: 7,
+			commitId: "abc123",
+			body: expect.stringContaining("- Inline comments: 1"),
+			comments: [
+				{
+					path: "src/index.ts",
+					line: 1,
+					side: "RIGHT",
+					body: "Valid inline comment.",
+				},
+			],
+		});
+		expect(deps.setReviewDone).toHaveBeenCalledTimes(1);
+	});
+
+	it("falls back to the ordinary PR comment when GitHub rejects review comments with 422", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("invalid review position", { status: 422 })),
+		);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const deps = buildReviewJobDependencies({
+			createPullRequestReview,
+		});
+
+		await expect(
+			processReviewJob(buildReviewJob(), buildEnv(), deps),
+		).resolves.toBeUndefined();
+
+		expect(deps.upsertPullRequestComment).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				body: expect.stringContaining("<!-- pr-bot-review -->"),
+			}),
+		);
+		expect(deps.setReviewDone).toHaveBeenCalledTimes(1);
 	});
 
 	it("marks non-retryable DeepSeek failures as failed without throwing", async () => {
@@ -455,12 +639,16 @@ function buildReviewJobDependencies(
 				additions: 1,
 				deletions: 0,
 				changes: 1,
-				patch: "@@ code @@\n+export const ok = true;",
+				patch: "@@ -0,0 +1,1 @@\n+export const ok = true;",
 			},
 		]),
 		generatePullRequestReview: vi.fn(async () => buildEnglishReview()),
 		upsertPullRequestComment: vi.fn(async () => {}),
-		buildReviewableDiff: vi.fn(() => "@@ code @@\n+export const ok = true;"),
+		createPullRequestReview: vi.fn(async () => {}),
+		buildReviewableDiff: vi.fn(() => "@@ -0,0 +1,1 @@\n+export const ok = true;"),
+		extractReviewableLines: vi.fn(() => [
+			{ path: "src/index.ts", line: 1, content: "export const ok = true;" },
+		]),
 		getReviewState: vi.fn(async () => undefined),
 		setReviewProcessing: vi.fn(async () => {}),
 		setReviewDone: vi.fn(async () => {}),
@@ -469,16 +657,25 @@ function buildReviewJobDependencies(
 	};
 }
 
-function buildEnglishReview(): string {
-	return [
-		"## 🤖 AI PR Review",
-		"### Summary",
-		"No obvious issues found.",
-		"### Issues to Watch",
-		"No obvious issues found.",
-		"### Suggestions",
-		"Keep the current implementation.",
-		"### Conclusion",
-		"Looks good to proceed.",
-	].join("\n");
+function buildEnglishReview() {
+	return {
+		summaryMarkdown: [
+			"## Review",
+			"### Summary",
+			"No obvious issues found.",
+			"### Issues to Watch",
+			"No obvious issues found.",
+			"### Suggestions",
+			"Keep the current implementation.",
+			"### Conclusion",
+			"Looks good to proceed.",
+		].join("\n"),
+		comments: [
+			{
+				path: "src/index.ts",
+				line: 1,
+				body: "Looks good.",
+			},
+		],
+	};
 }
