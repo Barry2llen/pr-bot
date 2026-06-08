@@ -1,0 +1,16 @@
+{
+	"compatibility_date": "2025-10-08",
+	"main": "src/index.ts",
+	"name": "pr-bot",
+	"upload_source_maps": true,
+	"observability": {
+		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "pr-bot-db",
+			"database_id": "c7133eee-422e-4fbe-88c1-a4c98cc62ea0"
+		}
+	]
+}
