@@ -1,5 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { buildReviewableDiff } from "../../src/deepseek";
+import { buildAiReviewCommentBody } from "../../src/review-job";
 import { handleGitHubWebhook } from "../../src/webhook";
 
 describe("PR bot worker", () => {
@@ -88,6 +90,62 @@ describe("PR bot worker", () => {
 				action: "opened",
 			},
 		]);
+	});
+
+	it("builds AI review comments with the stable marker", () => {
+		const body = buildAiReviewCommentBody({
+			pullNumber: 7,
+			headSha: "abc123",
+			changedFileCount: 2,
+			review: [
+				"## 🤖 AI PR Review",
+				"### 总结",
+				"没有发现明显问题。",
+				"### 需要关注的问题",
+				"没有发现明显问题。",
+				"### 建议",
+				"保持当前实现。",
+				"### 结论",
+				"可以继续。",
+			].join("\n"),
+		});
+
+		expect(body).toContain("<!-- pr-bot-review -->");
+		expect(body).toContain("## 🤖 AI PR Review");
+		expect(body).toContain("- PR: #7");
+	});
+
+	it("skips unreviewable files when building diff", () => {
+		const diff = buildReviewableDiff([
+			{
+				filename: "package-lock.json",
+				status: "modified",
+				additions: 1,
+				deletions: 1,
+				changes: 2,
+				patch: "@@ lock @@",
+			},
+			{
+				filename: "src/index.ts",
+				status: "modified",
+				additions: 2,
+				deletions: 0,
+				changes: 2,
+				patch: "@@ code @@\n+export const ok = true;",
+			},
+			{
+				filename: "dist/app.js",
+				status: "modified",
+				additions: 2,
+				deletions: 0,
+				changes: 2,
+				patch: "@@ built @@",
+			},
+		]);
+
+		expect(diff).toContain("src/index.ts");
+		expect(diff).not.toContain("package-lock.json");
+		expect(diff).not.toContain("dist/app.js");
 	});
 });
 

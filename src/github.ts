@@ -4,6 +4,15 @@ export type PullRequestFile = {
 	additions: number;
 	deletions: number;
 	changes: number;
+	patch?: string;
+};
+
+export type PullRequestMetadata = {
+	title: string;
+	body: string | null;
+	head: {
+		sha: string;
+	};
 };
 
 type GitHubComment = {
@@ -12,7 +21,7 @@ type GitHubComment = {
 };
 
 const GITHUB_API_BASE = "https://api.github.com";
-const BOT_COMMENT_MARKER = "<!-- pr-bot-review -->";
+export const BOT_COMMENT_MARKER = "<!-- pr-bot-review -->";
 
 export async function createInstallationAccessToken(
 	env: Env,
@@ -95,15 +104,26 @@ export async function listPullRequestFiles(
 	);
 }
 
+export async function getPullRequestMetadata(
+	token: string,
+	owner: string,
+	repo: string,
+	pullNumber: number,
+): Promise<PullRequestMetadata> {
+	return githubRequest<PullRequestMetadata>(
+		token,
+		`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${pullNumber}`,
+	);
+}
+
 export async function upsertPullRequestComment(args: {
 	token: string;
 	owner: string;
 	repo: string;
 	pullNumber: number;
-	headSha: string;
-	files: PullRequestFile[];
+	body: string;
 }): Promise<void> {
-	const { token, owner, repo, pullNumber, headSha, files } = args;
+	const { token, owner, repo, pullNumber, body } = args;
 	const commentsBasePath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${pullNumber}/comments`;
 	const comments = await githubRequest<GitHubComment[]>(
 		token,
@@ -112,7 +132,6 @@ export async function upsertPullRequestComment(args: {
 	const existingComment = comments.find((comment) =>
 		comment.body?.includes(BOT_COMMENT_MARKER),
 	);
-	const body = buildPullRequestCommentBody(pullNumber, headSha, files);
 
 	if (existingComment) {
 		await githubRequest<void>(
@@ -134,7 +153,7 @@ export async function upsertPullRequestComment(args: {
 	});
 }
 
-export function buildPullRequestCommentBody(
+export function buildPullRequestReceivedCommentBody(
 	pullNumber: number,
 	headSha: string,
 	files: PullRequestFile[],

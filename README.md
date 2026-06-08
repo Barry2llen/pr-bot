@@ -1,6 +1,6 @@
 # PR Bot Worker
 
-Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, enqueues a review job, and processes that job with Cloudflare Queues. The queue consumer reads changed files and creates or updates one PR conversation comment marked with `<!-- pr-bot-review -->`.
+Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, enqueues a review job, and processes that job with Cloudflare Queues. The queue consumer reads PR metadata and changed files, sends a bounded diff to DeepSeek, and creates or updates one PR conversation comment marked with `<!-- pr-bot-review -->`.
 
 ## GitHub App Setup
 
@@ -22,6 +22,8 @@ https://<your-worker-domain>/webhook
 
 ## Local Development
 
+Create a DeepSeek API key from the DeepSeek platform console, then keep it in Worker variables only. Do not commit real secrets.
+
 Create local Worker variables:
 
 ```bash
@@ -34,6 +36,8 @@ Fill in `.dev.vars`:
 GITHUB_APP_ID=123456
 GITHUB_WEBHOOK_SECRET=replace_me
 GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+DEEPSEEK_API_KEY=replace_me
+DEEPSEEK_MODEL=deepseek-v4-flash
 PORT=8787
 ```
 
@@ -44,7 +48,7 @@ npm install
 npm run dev
 ```
 
-Wrangler loads `.dev.vars` automatically. `npm run dev` also reads `PORT` from `.dev.vars` and starts Wrangler with `--port <PORT>`. The Worker normalizes escaped newlines in `GITHUB_PRIVATE_KEY`, so a single-line PEM with `\n` works.
+Wrangler loads `.dev.vars` automatically. `npm run dev` also reads `PORT` from `.dev.vars` and starts Wrangler with `--port <PORT>`. The Worker normalizes escaped newlines in `GITHUB_PRIVATE_KEY`, so a single-line PEM with `\n` works. `DEEPSEEK_MODEL` is optional and defaults to `deepseek-v4-flash`.
 
 ## Queue Setup
 
@@ -67,7 +71,7 @@ max_batch_size = 10
 max_batch_timeout = 5
 ```
 
-`POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, lists PR files, and upserts the PR comment.
+`POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, reads PR metadata and files, filters generated or unreviewable patches, calls DeepSeek with a non-streaming chat completions request, and upserts the PR comment.
 
 ## Deployment
 
@@ -78,7 +82,10 @@ npx wrangler queues create pr-bot-review
 npx wrangler secret put GITHUB_APP_ID
 npx wrangler secret put GITHUB_WEBHOOK_SECRET
 npx wrangler secret put GITHUB_PRIVATE_KEY
+npx wrangler secret put DEEPSEEK_API_KEY
 ```
+
+`DEEPSEEK_MODEL` is optional. If you want to override the default model, configure it as a Worker variable or secret with value such as `deepseek-v4-flash`.
 
 Deploy:
 
@@ -98,8 +105,9 @@ https://<your-worker-domain>/webhook
 2. Open a pull request, or push a new commit to an existing PR.
 3. Confirm the webhook request receives `202 accepted`.
 4. Confirm the queue consumer runs without retrying indefinitely.
-5. Confirm the PR conversation contains or updates a `🤖 PR Bot` comment.
-6. Confirm the comment lists the changed files and the PR head SHA.
+5. Confirm the PR conversation contains or updates a `🤖 AI PR Review` comment.
+6. Confirm the comment includes Chinese Markdown sections: `总结`, `需要关注的问题`, `建议`, and `结论`.
+7. Update the PR again and confirm the same marked comment is updated instead of creating duplicate comments.
 
 Health check:
 

@@ -17,6 +17,8 @@ export default defineWorkersConfig({
 						GITHUB_WEBHOOK_SECRET: "test-secret",
 						GITHUB_PRIVATE_KEY:
 							"-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----",
+						DEEPSEEK_API_KEY: "test-deepseek-key",
+						DEEPSEEK_MODEL: "deepseek-v4-flash",
 					},
 					queueProducers: {
 						REVIEW_QUEUE: "pr-bot-review",

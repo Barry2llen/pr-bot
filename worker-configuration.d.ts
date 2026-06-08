@@ -10,6 +10,8 @@ declare namespace Cloudflare {
 		GITHUB_APP_ID: string;
 		GITHUB_WEBHOOK_SECRET: string;
 		GITHUB_PRIVATE_KEY: string;
+		DEEPSEEK_API_KEY: string;
+		DEEPSEEK_MODEL?: string;
 		PORT: string;
 	}
 }
