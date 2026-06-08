@@ -1,6 +1,6 @@
 # PR Bot Worker
 
-Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, enqueues a review job, and processes that job with Cloudflare Queues. The queue consumer reads PR metadata and changed files, sends a bounded diff to DeepSeek, and creates or updates one PR conversation comment marked with `<!-- pr-bot-review -->`.
+Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, enqueues a review job, and processes that job with Cloudflare Queues. The queue consumer reads PR metadata and changed files, sends a bounded diff to DeepSeek, and submits a GitHub Pull Request Review. The review body contains the high-level summary, and reliable review comments are placed on specific added diff lines. Ordinary PR conversation comments marked with `<!-- pr-bot-review -->` are still used for `processing` and `failed` status. The bot does not create Check Runs, automatically request changes, or resolve review threads.
 
 ## GitHub App Setup
 
@@ -88,7 +88,16 @@ id = "replace_with_production_kv_namespace_id"
 preview_id = "replace_with_preview_kv_namespace_id"
 ```
 
-`POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, reads PR metadata and files, filters generated or unreviewable patches, calls DeepSeek with a non-streaming chat completions request, and upserts the PR comment.
+`POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, reads PR metadata and files, filters generated or unreviewable patches, calls DeepSeek with a non-streaming chat completions request, and submits a Pull Request Review.
+
+## Pull Request Review Mode
+
+- The bot submits a GitHub Pull Request Review instead of only updating an ordinary PR conversation comment.
+- The review body contains high-level feedback and metadata.
+- Inline comments are only placed on added lines that are present in the diff.
+- If no safe inline comments are available, the bot submits a summary-only review.
+- The existing ordinary PR conversation comment may still be used for `processing` or `failed` status. The `processing` comment is temporary and is deleted after the Pull Request Review is created successfully.
+- If GitHub returns `422` for review comment positioning, the Worker falls back to the ordinary marker comment to avoid infinite Queue retries.
 
 ## Review State and Idempotency
 
@@ -148,9 +157,11 @@ https://<your-worker-domain>/webhook
 2. Open a pull request, or push a new commit to an existing PR.
 3. Confirm the webhook request receives `202 accepted`.
 4. Confirm the queue consumer runs without retrying indefinitely.
-5. Confirm the PR conversation contains or updates a `Review` comment.
-6. Confirm the comment includes English Markdown sections: `Summary`, `Issues to Watch`, `Suggestions`, and `Conclusion`.
-7. Update the PR again and confirm the same marked comment is updated instead of creating duplicate comments.
+5. Confirm the PR conversation first contains or updates a `processing` status comment.
+6. Confirm a GitHub Pull Request Review appears with an English Markdown summary, and the temporary `processing` ordinary comment is deleted.
+7. If the model found reliable issues, confirm inline comments appear on specific added diff lines.
+8. If no reliable inline comments are available, confirm a summary-only review is still submitted.
+9. Update the PR again and confirm the same head SHA does not call the model again; a new head SHA triggers a new review.
 
 Health check:
 

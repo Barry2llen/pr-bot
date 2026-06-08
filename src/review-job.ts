@@ -1,13 +1,22 @@
 import {
 	DeepSeekError,
+	type AiReviewResult,
 	buildReviewableDiff,
 	generatePullRequestReview,
 } from "./deepseek";
 import {
+	extractReviewableLines,
+	type ReviewableLine,
+} from "./diff-lines";
+import {
 	BOT_COMMENT_MARKER,
+	PullRequestReviewUnprocessableError,
 	createInstallationAccessToken,
+	createPullRequestReview,
+	deleteIssueComment,
 	getPullRequestMetadata,
 	listPullRequestFiles,
+	type PullRequestReviewComment,
 	upsertPullRequestComment,
 } from "./github";
 import {
@@ -35,7 +44,10 @@ export type ReviewJobDependencies = {
 	listPullRequestFiles: typeof listPullRequestFiles;
 	generatePullRequestReview: typeof generatePullRequestReview;
 	upsertPullRequestComment: typeof upsertPullRequestComment;
+	createPullRequestReview: typeof createPullRequestReview;
+	deleteIssueComment: typeof deleteIssueComment;
 	buildReviewableDiff: typeof buildReviewableDiff;
+	extractReviewableLines: typeof extractReviewableLines;
 	getReviewState: typeof getReviewState;
 	setReviewProcessing: typeof setReviewProcessing;
 	setReviewDone: typeof setReviewDone;
@@ -48,7 +60,10 @@ const defaultDependencies: ReviewJobDependencies = {
 	listPullRequestFiles,
 	generatePullRequestReview,
 	upsertPullRequestComment,
+	createPullRequestReview,
+	deleteIssueComment,
 	buildReviewableDiff,
+	extractReviewableLines,
 	getReviewState,
 	setReviewProcessing,
 	setReviewDone,
@@ -95,7 +110,7 @@ export async function processReviewJob(
 	}
 
 	await deps.setReviewProcessing(env, stateKey, job);
-	await deps.upsertPullRequestComment({
+	const processingCommentId = await deps.upsertPullRequestComment({
 		token,
 		owner: job.owner,
 		repo: job.repo,
@@ -113,6 +128,7 @@ export async function processReviewJob(
 		job.pullNumber,
 	);
 	const diff = deps.buildReviewableDiff(files);
+	const reviewableLines = deps.extractReviewableLines(files);
 
 	try {
 		const review = await deps.generatePullRequestReview({
@@ -123,21 +139,39 @@ export async function processReviewJob(
 			pullRequest,
 			files,
 			diff,
+			reviewableLines,
+		});
+		const validatedComments = validateReviewComments(
+			review.comments,
+			reviewableLines,
+		);
+		const reviewBody = buildReviewSummaryBody({
+			pullNumber: job.pullNumber,
+			headSha: pullRequest.head.sha || job.headSha,
+			changedFileCount: files.length,
+			inlineCommentCount: validatedComments.length,
+			review,
 		});
 
-		await deps.upsertPullRequestComment({
+		const reviewCreated = await createPullRequestReviewWithFallback({
+			deps,
 			token,
 			owner: job.owner,
 			repo: job.repo,
 			pullNumber: job.pullNumber,
-			body: buildAiReviewCommentBody({
-				pullNumber: job.pullNumber,
-				headSha: pullRequest.head.sha || job.headSha,
-				changedFileCount: files.length,
-				review,
-			}),
+			commitId: pullRequest.head.sha || job.headSha,
+			body: reviewBody,
+			comments: validatedComments,
 		});
 		await deps.setReviewDone(env, stateKey, job);
+		if (reviewCreated) {
+			await deps.deleteIssueComment({
+				token,
+				owner: job.owner,
+				repo: job.repo,
+				commentId: processingCommentId,
+			});
+		}
 	} catch (error) {
 		if (error instanceof DeepSeekError && !error.retryable) {
 			await deps.upsertPullRequestComment({
@@ -167,20 +201,114 @@ export function buildAiReviewCommentBody(args: {
 	pullNumber: number;
 	headSha: string;
 	changedFileCount: number;
-	review: string;
+	review: string | AiReviewResult;
+	inlineCommentCount?: number;
 }): string {
-	const { pullNumber, headSha, changedFileCount, review } = args;
-
 	return [
 		BOT_COMMENT_MARKER,
-		review.trim(),
+		buildReviewSummaryBody(args),
+	].join("\n");
+}
+
+export function buildReviewSummaryBody(args: {
+	pullNumber: number;
+	headSha: string;
+	changedFileCount: number;
+	review: string | AiReviewResult;
+	inlineCommentCount?: number;
+}): string {
+	const {
+		pullNumber,
+		headSha,
+		changedFileCount,
+		review,
+		inlineCommentCount = 0,
+	} = args;
+	const summary =
+		typeof review === "string" ? review.trim() : review.summaryMarkdown.trim();
+
+	return [
+		summary || "## Review\n\nNo summary returned.",
 		"",
 		"---",
 		`- PR: #${pullNumber}`,
 		`- Head SHA: \`${headSha}\``,
 		`- Changed files: ${changedFileCount}`,
+		`- Inline comments: ${inlineCommentCount}`,
 		"- Status: `done`",
 	].join("\n");
+}
+
+export function validateReviewComments(
+	comments: AiReviewResult["comments"],
+	reviewableLines: ReviewableLine[],
+): PullRequestReviewComment[] {
+	const reviewableSet = new Set(
+		reviewableLines.map((line) => `${line.path}:${line.line}`),
+	);
+	const seen = new Set<string>();
+	const validated: PullRequestReviewComment[] = [];
+
+	for (const comment of comments) {
+		const key = `${comment.path}:${comment.line}`;
+		const body = comment.body.trim();
+		if (
+			!reviewableSet.has(key) ||
+			seen.has(key) ||
+			!body ||
+			validated.length >= 5
+		) {
+			continue;
+		}
+
+		seen.add(key);
+		validated.push({
+			path: comment.path,
+			line: comment.line,
+			side: "RIGHT",
+			body: body.slice(0, 2000),
+		});
+	}
+
+	return validated;
+}
+
+async function createPullRequestReviewWithFallback(args: {
+	deps: ReviewJobDependencies;
+	token: string;
+	owner: string;
+	repo: string;
+	pullNumber: number;
+	commitId: string;
+	body: string;
+	comments: PullRequestReviewComment[];
+}): Promise<boolean> {
+	const { deps, token, owner, repo, pullNumber, commitId, body, comments } = args;
+	try {
+		await deps.createPullRequestReview({
+			token,
+			owner,
+			repo,
+			pullNumber,
+			commitId,
+			body,
+			comments,
+		});
+		return true;
+	} catch (error) {
+		if (!(error instanceof PullRequestReviewUnprocessableError)) {
+			throw error;
+		}
+
+		await deps.upsertPullRequestComment({
+			token,
+			owner,
+			repo,
+			pullNumber,
+			body: [BOT_COMMENT_MARKER, body].join("\n"),
+		});
+		return false;
+	}
 }
 
 function buildProcessingReviewCommentBody(args: {
