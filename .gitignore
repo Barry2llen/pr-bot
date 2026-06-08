@@ -193,6 +193,7 @@ dist
 
 ### Wrangler ###
 .wrangler/
+wrangler.toml
 .env*
 !.env.example
 .dev.vars*

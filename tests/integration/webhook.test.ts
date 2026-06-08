@@ -1,6 +1,10 @@
 import { SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DIFF_TRUNCATED_NOTICE, buildReviewableDiff } from "../../src/deepseek";
+import {
+	DIFF_TRUNCATED_NOTICE,
+	DeepSeekError,
+	buildReviewableDiff,
+} from "../../src/deepseek";
 import { githubRequest, listPullRequestFiles } from "../../src/github";
 import {
 	buildAiReviewCommentBody,
@@ -123,6 +127,7 @@ describe("PR bot worker", () => {
 		expect(body).toContain("<!-- pr-bot-review -->");
 		expect(body).toContain("## 🤖 AI PR Review");
 		expect(body).toContain("- PR: #7");
+		expect(body).toContain("- Status: `done`");
 	});
 
 	it("skips unreviewable files when building diff", () => {
@@ -201,6 +206,109 @@ describe("PR bot worker", () => {
 		expect(listPullRequestFilesMock).not.toHaveBeenCalled();
 		expect(generatePullRequestReviewMock).not.toHaveBeenCalled();
 		expect(upsertPullRequestCommentMock).not.toHaveBeenCalled();
+	});
+
+	it("skips review jobs that already have done state", async () => {
+		const deps = buildReviewJobDependencies({
+			getReviewState: vi.fn(async () => ({
+				status: "done",
+				finishedAt: new Date().toISOString(),
+			})),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(deps.generatePullRequestReview).not.toHaveBeenCalled();
+		expect(deps.listPullRequestFiles).not.toHaveBeenCalled();
+	});
+
+	it("skips duplicate in-flight review jobs", async () => {
+		const deps = buildReviewJobDependencies({
+			getReviewState: vi.fn(async () => ({
+				status: "processing",
+				startedAt: new Date().toISOString(),
+			})),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(deps.generatePullRequestReview).not.toHaveBeenCalled();
+		expect(deps.listPullRequestFiles).not.toHaveBeenCalled();
+	});
+
+	it("continues stale in-flight review jobs", async () => {
+		const deps = buildReviewJobDependencies({
+			getReviewState: vi.fn(async () => ({
+				status: "processing",
+				startedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+			})),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(deps.generatePullRequestReview).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues retried jobs with the same delivery id while processing", async () => {
+		const deps = buildReviewJobDependencies({
+			getReviewState: vi.fn(async () => ({
+				status: "processing",
+				startedAt: new Date().toISOString(),
+				deliveryId: "delivery-id",
+			})),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(deps.generatePullRequestReview).toHaveBeenCalledTimes(1);
+	});
+
+	it("writes processing before DeepSeek and done after updating the comment", async () => {
+		const calls: string[] = [];
+		const deps = buildReviewJobDependencies({
+			setReviewProcessing: vi.fn(async () => {
+				calls.push("processing");
+			}),
+			generatePullRequestReview: vi.fn(async () => {
+				calls.push("deepseek");
+				return buildEnglishReview();
+			}),
+			upsertPullRequestComment: vi.fn(async ({ body }) => {
+				calls.push(body.includes("Status: `processing`") ? "comment:processing" : "comment:done");
+			}),
+			setReviewDone: vi.fn(async () => {
+				calls.push("done");
+			}),
+		});
+
+		await processReviewJob(buildReviewJob(), buildEnv(), deps);
+
+		expect(calls).toEqual([
+			"processing",
+			"comment:processing",
+			"deepseek",
+			"comment:done",
+			"done",
+		]);
+	});
+
+	it("marks non-retryable DeepSeek failures as failed without throwing", async () => {
+		const deps = buildReviewJobDependencies({
+			generatePullRequestReview: vi.fn(async () => {
+				throw new DeepSeekError("DeepSeek API request failed", 401, false);
+			}),
+		});
+
+		await expect(
+			processReviewJob(buildReviewJob(), buildEnv(), deps),
+		).resolves.toBeUndefined();
+
+		expect(deps.setReviewFailed).toHaveBeenCalledTimes(1);
+		expect(deps.upsertPullRequestComment).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				body: expect.stringContaining("- Status: `failed`"),
+			}),
+		);
 	});
 
 	it("paginates pull request files", async () => {
@@ -298,4 +406,79 @@ function jsonResponse(body: unknown): Response {
 		status: 200,
 		headers: { "Content-Type": "application/json" },
 	});
+}
+
+function buildReviewJob() {
+	return {
+		installationId: 42,
+		owner: "Barry2llen",
+		repo: "pr-bot",
+		pullNumber: 7,
+		headSha: "abc123",
+		deliveryId: "delivery-id",
+		action: "synchronize",
+	};
+}
+
+function buildEnv(): Env {
+	return {
+		GITHUB_APP_ID: "123456",
+		GITHUB_PRIVATE_KEY: "private-key",
+		GITHUB_WEBHOOK_SECRET: "test-secret",
+		DEEPSEEK_API_KEY: "deepseek-key",
+		DEEPSEEK_MODEL: "deepseek-v4-flash",
+		REVIEW_STATE: {
+			get: vi.fn(),
+			put: vi.fn(),
+		} as unknown as KVNamespace,
+		REVIEW_QUEUE: {
+			send: vi.fn(),
+		} as unknown as Queue,
+		PORT: "8787",
+	};
+}
+
+function buildReviewJobDependencies(
+	overrides: Partial<ReviewJobDependencies> = {},
+): ReviewJobDependencies {
+	return {
+		createInstallationAccessToken: vi.fn(async () => "installation-token"),
+		getPullRequestMetadata: vi.fn(async () => ({
+			title: "Fresh PR",
+			body: null,
+			head: { sha: "abc123" },
+		})),
+		listPullRequestFiles: vi.fn(async () => [
+			{
+				filename: "src/index.ts",
+				status: "modified",
+				additions: 1,
+				deletions: 0,
+				changes: 1,
+				patch: "@@ code @@\n+export const ok = true;",
+			},
+		]),
+		generatePullRequestReview: vi.fn(async () => buildEnglishReview()),
+		upsertPullRequestComment: vi.fn(async () => {}),
+		buildReviewableDiff: vi.fn(() => "@@ code @@\n+export const ok = true;"),
+		getReviewState: vi.fn(async () => undefined),
+		setReviewProcessing: vi.fn(async () => {}),
+		setReviewDone: vi.fn(async () => {}),
+		setReviewFailed: vi.fn(async () => {}),
+		...overrides,
+	};
+}
+
+function buildEnglishReview(): string {
+	return [
+		"## 🤖 AI PR Review",
+		"### Summary",
+		"No obvious issues found.",
+		"### Issues to Watch",
+		"No obvious issues found.",
+		"### Suggestions",
+		"Keep the current implementation.",
+		"### Conclusion",
+		"Looks good to proceed.",
+	].join("\n");
 }

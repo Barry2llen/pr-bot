@@ -14,3 +14,8 @@ queue = "pr-bot-review"
 queue = "pr-bot-review"
 max_batch_size = 1
 max_batch_timeout = 5
+
+[[kv_namespaces]]
+binding = "REVIEW_STATE"
+id = "replace_with_production_kv_namespace_id"
+preview_id = "replace_with_preview_kv_namespace_id"
