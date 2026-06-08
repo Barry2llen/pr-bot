@@ -1,10 +1,20 @@
 import { SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
-import { buildReviewableDiff } from "../../src/deepseek";
-import { buildAiReviewCommentBody } from "../../src/review-job";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DIFF_TRUNCATED_NOTICE, buildReviewableDiff } from "../../src/deepseek";
+import { githubRequest, listPullRequestFiles } from "../../src/github";
+import {
+	buildAiReviewCommentBody,
+	processReviewJob,
+	type ReviewJobDependencies,
+} from "../../src/review-job";
 import { handleGitHubWebhook } from "../../src/webhook";
 
 describe("PR bot worker", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
+	});
+
 	it("returns health status", async () => {
 		const response = await SELF.fetch("http://local.test/health");
 
@@ -99,14 +109,14 @@ describe("PR bot worker", () => {
 			changedFileCount: 2,
 			review: [
 				"## 🤖 AI PR Review",
-				"### 总结",
-				"没有发现明显问题。",
-				"### 需要关注的问题",
-				"没有发现明显问题。",
-				"### 建议",
-				"保持当前实现。",
-				"### 结论",
-				"可以继续。",
+				"### Summary",
+				"No obvious issues found.",
+				"### Issues to Watch",
+				"No obvious issues found.",
+				"### Suggestions",
+				"Keep the current implementation.",
+				"### Conclusion",
+				"Looks good to proceed.",
 			].join("\n"),
 		});
 
@@ -147,6 +157,119 @@ describe("PR bot worker", () => {
 		expect(diff).not.toContain("package-lock.json");
 		expect(diff).not.toContain("dist/app.js");
 	});
+
+	it("skips stale review jobs without reading files or updating comments", async () => {
+		const listPullRequestFilesMock = vi.fn();
+		const generatePullRequestReviewMock = vi.fn();
+		const upsertPullRequestCommentMock = vi.fn();
+		const deps = {
+			createInstallationAccessToken: vi.fn(async () => "installation-token"),
+			getPullRequestMetadata: vi.fn(async () => ({
+				title: "Fresh PR",
+				body: null,
+				head: { sha: "current-sha" },
+			})),
+			listPullRequestFiles: listPullRequestFilesMock,
+			generatePullRequestReview: generatePullRequestReviewMock,
+			upsertPullRequestComment: upsertPullRequestCommentMock,
+			buildReviewableDiff: vi.fn(),
+		} satisfies ReviewJobDependencies;
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await processReviewJob(
+			{
+				installationId: 42,
+				owner: "Barry2llen",
+				repo: "pr-bot",
+				pullNumber: 7,
+				headSha: "queued-sha",
+				deliveryId: "delivery-id",
+				action: "synchronize",
+			},
+			{} as Env,
+			deps,
+		);
+
+		expect(logSpy).toHaveBeenCalledWith("Skip stale review job", {
+			owner: "Barry2llen",
+			repo: "pr-bot",
+			pullNumber: 7,
+			jobHeadSha: "queued-sha",
+			currentHeadSha: "current-sha",
+			deliveryId: "delivery-id",
+		});
+		expect(listPullRequestFilesMock).not.toHaveBeenCalled();
+		expect(generatePullRequestReviewMock).not.toHaveBeenCalled();
+		expect(upsertPullRequestCommentMock).not.toHaveBeenCalled();
+	});
+
+	it("paginates pull request files", async () => {
+		const firstPage = Array.from({ length: 100 }, (_, index) => ({
+			filename: `src/file-${index}.ts`,
+			status: "modified",
+			additions: 1,
+			deletions: 0,
+			changes: 1,
+		}));
+		const secondPage = [
+			{
+				filename: "src/final.ts",
+				status: "added",
+				additions: 2,
+				deletions: 0,
+				changes: 2,
+			},
+		];
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(jsonResponse(firstPage))
+			.mockResolvedValueOnce(jsonResponse(secondPage));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const files = await listPullRequestFiles(
+			"token",
+			"Barry2llen",
+			"pr-bot",
+			7,
+		);
+
+		expect(files).toHaveLength(101);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain("page=1");
+		expect(fetchMock.mock.calls[1]?.[0]).toContain("page=2");
+	});
+
+	it("adds a truncation notice when reviewable diff exceeds the limit", () => {
+		const diff = buildReviewableDiff([
+			{
+				filename: "src/large.ts",
+				status: "modified",
+				additions: 70_000,
+				deletions: 0,
+				changes: 70_000,
+				patch: `@@ large @@\n+${"x".repeat(70_000)}`,
+			},
+		]);
+
+		expect(diff).toContain(DIFF_TRUNCATED_NOTICE);
+	});
+
+	it("truncates long GitHub API error bodies before logging", async () => {
+		const longBody = "x".repeat(1500);
+		const fetchMock = vi.fn().mockResolvedValue(new Response(longBody, {
+			status: 500,
+		}));
+		vi.stubGlobal("fetch", fetchMock);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(githubRequest("token", "/boom")).rejects.toThrow(
+			"GitHub API request failed",
+		);
+
+		const logged = errorSpy.mock.calls[0]?.[1] as { body?: string };
+		expect(logged.body).toHaveLength(1000);
+		expect(logged.body).not.toBe(longBody);
+	});
 });
 
 async function signBody(body: string, secret: string): Promise<string> {
@@ -168,4 +291,11 @@ async function signBody(body: string, secret: string): Promise<string> {
 
 function bytesToHex(bytes: Uint8Array): string {
 	return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function jsonResponse(body: unknown): Response {
+	return new Response(JSON.stringify(body), {
+		status: 200,
+		headers: { "Content-Type": "application/json" },
+	});
 }
