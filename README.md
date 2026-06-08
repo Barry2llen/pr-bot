@@ -1,37 +1,39 @@
 # PR Bot Worker
 
-Cloudflare Worker GitHub App MVP. It receives GitHub `pull_request` webhooks, verifies the webhook signature, enqueues a review job, and processes that job with Cloudflare Queues. The queue consumer reads PR metadata and changed files, sends a bounded diff to DeepSeek, and creates or updates one PR conversation comment marked with `<!-- pr-bot-review -->`.
+[English README](./README.en.md)
 
-## GitHub App Setup
+这是一个运行在 Cloudflare Workers 上的 GitHub App PR 审查机器人。它接收 GitHub `pull_request` webhook，验证 webhook 签名，把审查任务发送到 Cloudflare Queues，并由 Queue consumer 调用 DeepSeek 生成英文 Markdown PR Review。机器人只会在 PR Conversation 里创建或更新一条带有 `<!-- pr-bot-review -->` marker 的普通评论，不做行内评论、Check Run 或 request changes。
 
-Required repository permissions:
+## GitHub App 配置
+
+仓库权限要求：
 
 - Metadata: Read-only
 - Pull requests: Read & write
-- Contents: Read-only, optional but recommended
+- Contents: Read-only，可选但推荐
 
-Subscribe to events:
+订阅事件：
 
 - Pull request
 
-Set the GitHub App Webhook URL to:
+GitHub App Webhook URL 设置为：
 
 ```text
 https://<your-worker-domain>/webhook
 ```
 
-## Local Development
+## 本地开发
 
-Create a DeepSeek API key from the DeepSeek platform console, then keep it in Worker variables only. Do not commit real secrets.
+先从 DeepSeek 平台控制台创建 API Key，并只把它放在 Worker 变量或 Cloudflare secret 中。不要提交真实 secret。
 
-Create local Worker variables:
+创建本地配置文件：
 
 ```bash
 cp .dev.vars.example .dev.vars
 cp wrangler.example.toml wrangler.toml
 ```
 
-Fill in `.dev.vars`:
+填写 `.dev.vars`：
 
 ```dotenv
 GITHUB_APP_ID=123456
@@ -42,35 +44,35 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 PORT=8787
 ```
 
-Install dependencies and start Wrangler:
+安装依赖并启动本地 Worker：
 
 ```bash
 npm install
 npm run dev
 ```
 
-Wrangler loads `.dev.vars` automatically. `npm run dev` also reads `PORT` from `.dev.vars` and starts Wrangler with `--port <PORT>`. The Worker normalizes escaped newlines in `GITHUB_PRIVATE_KEY`, so a single-line PEM with `\n` works. `DEEPSEEK_MODEL` is optional and defaults to `deepseek-v4-flash`.
+Wrangler 会自动加载 `.dev.vars`。`npm run dev` 还会读取 `.dev.vars` 中的 `PORT`，并用 `--port <PORT>` 启动 Wrangler。Worker 会把 `GITHUB_PRIVATE_KEY` 里的 `\n` 转义恢复成真实换行，所以单行 PEM 可以正常工作。`DEEPSEEK_MODEL` 是可选项，默认值为 `deepseek-v4-flash`。
 
-`wrangler.toml` is local-only and ignored by Git. Keep real Cloudflare resource IDs in `wrangler.toml`; commit shared placeholders and structure in `wrangler.example.toml`.
+`wrangler.toml` 是本地配置文件，已被 Git 忽略。真实 Cloudflare 资源 ID 只放在本地 `wrangler.toml` 中；仓库只提交带占位符的 `wrangler.example.toml`。
 
-## Queue Setup
+## Queue 和 KV 配置
 
-Create the queue before deploying:
+部署前先创建 Queue：
 
 ```bash
 npx wrangler queues create pr-bot-review
 ```
 
-Create the KV namespaces used for review state:
+创建用于记录 Review 状态的 KV namespace：
 
 ```bash
 npx wrangler kv namespace create REVIEW_STATE
 npx wrangler kv namespace create REVIEW_STATE --preview
 ```
 
-Copy the generated production `id` and preview `preview_id` into your local `wrangler.toml`. Do not commit real namespace IDs. `wrangler.example.toml` should keep placeholders.
+把 Wrangler 输出的生产 `id` 和预览 `preview_id` 填回本地 `wrangler.toml`。不要提交真实 namespace ID。`wrangler.example.toml` 应继续保留占位符。
 
-`wrangler.example.toml` documents the required queue and KV bindings:
+`wrangler.example.toml` 包含必要的 Queue 和 KV binding：
 
 ```toml
 [[queues.producers]]
@@ -88,32 +90,33 @@ id = "replace_with_production_kv_namespace_id"
 preview_id = "replace_with_preview_kv_namespace_id"
 ```
 
-`POST /webhook` only verifies and filters the GitHub webhook, then sends a `ReviewJob` to `REVIEW_QUEUE`. The queue consumer gets the GitHub App installation token, reads PR metadata and files, filters generated or unreviewable patches, calls DeepSeek with a non-streaming chat completions request, and upserts the PR comment.
+`POST /webhook` 只负责验签、过滤 GitHub webhook，并把 `ReviewJob` 发送到 `REVIEW_QUEUE`。Queue consumer 会获取 GitHub App installation token，读取 PR metadata 和 changed files，过滤生成文件或不可审查 patch，调用 DeepSeek 的非流式 chat completions API，然后 upsert 同一条 PR 评论。
 
-## Review State and Idempotency
+## Review 状态和幂等
 
-`REVIEW_STATE` KV stores best-effort review status for each PR head SHA so the same commit does not repeatedly call DeepSeek.
+`REVIEW_STATE` KV 用于保存每个 PR head SHA 的审查状态，避免同一个 commit 重复调用 DeepSeek。
 
-State keys use this format:
+状态 key 格式：
 
 ```text
 review:<owner>/<repo>:<pullNumber>:<headSha>
 ```
 
-Possible statuses are `processing`, `done`, and `failed`. A `processing` state younger than 10 minutes is treated as an in-flight duplicate and skipped. A `processing` state older than 10 minutes can be retried. A recent `failed` state is skipped briefly to avoid immediate repeated failures. Review state expires after 30 days.
+状态包括 `processing`、`done`、`failed`。如果 `processing` 状态创建时间小于 10 分钟，会被视为正在处理的重复任务并跳过；超过 10 分钟则允许重新处理。最近失败的 `failed` 状态会短暂跳过，避免明显不可恢复错误被立即反复处理。状态保存 30 天后过期。
 
-KV failures do not block PR review. If KV is unavailable, the Worker logs a safe warning and continues, with reduced idempotency until KV works again.
+KV 是 best-effort：如果 KV 操作失败，Worker 会记录安全 warning 并继续审查，只是幂等能力会暂时降低。
 
-## Reliability Notes
+## 可靠性说明
 
-- Stale queue jobs are skipped when the current PR head SHA no longer matches the queued job head SHA.
-- PR changed files are fetched with pagination.
-- Very large diffs are truncated before sending to DeepSeek, and the review prompt includes a truncation notice.
-- Queue batch size is set to 1 for safer AI review processing.
+- 如果 Queue 中的旧任务对应的 head SHA 已经不是当前 PR head SHA，会直接跳过，避免 stale review 覆盖新 review。
+- PR changed files 使用分页读取。
+- 超大 diff 会在发送给 DeepSeek 前截断，prompt 中会包含截断提示。
+- Queue consumer batch size 设置为 1，降低 AI 审查并发风险。
+- GitHub 和 DeepSeek 错误日志会截断 body，避免输出过长响应或敏感信息。
 
-## Deployment
+## 部署
 
-Create the local Wrangler config, then create Cloudflare resources and configure production secrets:
+先创建本地 Wrangler 配置，再创建 Cloudflare 资源并配置生产 secrets：
 
 ```bash
 cp wrangler.example.toml wrangler.toml
@@ -126,45 +129,45 @@ npx wrangler secret put GITHUB_PRIVATE_KEY
 npx wrangler secret put DEEPSEEK_API_KEY
 ```
 
-Before deploying, replace the placeholder KV `id` and `preview_id` in your local `wrangler.toml` with the values printed by Wrangler. Keep `wrangler.example.toml` generic for the repository.
+部署前，把本地 `wrangler.toml` 中的 KV `id` 和 `preview_id` 占位符替换为 Wrangler 输出的真实值。`wrangler.example.toml` 继续保持通用占位符。
 
-`DEEPSEEK_MODEL` is optional. If you want to override the default model, configure it as a Worker variable or secret with value such as `deepseek-v4-flash`.
+`DEEPSEEK_MODEL` 是可选配置。如果要覆盖默认模型，可以把它配置为 Worker variable 或 secret，例如 `deepseek-v4-flash`。
 
-Deploy:
+部署 Worker：
 
 ```bash
 npm run deploy
 ```
 
-After deployment, point the GitHub App Webhook URL to:
+部署完成后，把 GitHub App Webhook URL 指向：
 
 ```text
 https://<your-worker-domain>/webhook
 ```
 
-## Verification
+## 验证
 
-1. Install the GitHub App to a test repository.
-2. Open a pull request, or push a new commit to an existing PR.
-3. Confirm the webhook request receives `202 accepted`.
-4. Confirm the queue consumer runs without retrying indefinitely.
-5. Confirm the PR conversation contains or updates a `🤖 AI PR Review` comment.
-6. Confirm the comment includes English Markdown sections: `Summary`, `Issues to Watch`, `Suggestions`, and `Conclusion`.
-7. Update the PR again and confirm the same marked comment is updated instead of creating duplicate comments.
+1. 把 GitHub App 安装到测试仓库。
+2. 打开一个 PR，或给已有 PR 推送新 commit。
+3. 确认 webhook 请求返回 `202 accepted`。
+4. 确认 Queue consumer 没有无限 retry。
+5. 确认 PR Conversation 中出现或更新 `Review` 评论。
+6. 确认评论包含英文 Markdown sections：`Summary`、`Issues to Watch`、`Suggestions`、`Conclusion`。
+7. 再次更新 PR，确认同一条 marker 评论被更新，而不是创建重复评论。
 
-Health check:
+健康检查：
 
 ```bash
 curl https://<your-worker-domain>/health
 ```
 
-Expected response:
+期望响应：
 
 ```json
 { "ok": true }
 ```
 
-## Scripts
+## 常用脚本
 
 ```bash
 npm run typecheck
