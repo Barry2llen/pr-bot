@@ -9,7 +9,7 @@ export default defineWorkersConfig({
 			workers: {
 				singleWorker: true,
 				wrangler: {
-					configPath: "../wrangler.jsonc",
+					configPath: "../wrangler.toml",
 				},
 				miniflare: {
 					bindings: {
@@ -17,6 +17,15 @@ export default defineWorkersConfig({
 						GITHUB_WEBHOOK_SECRET: "test-secret",
 						GITHUB_PRIVATE_KEY:
 							"-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----",
+					},
+					queueProducers: {
+						REVIEW_QUEUE: "pr-bot-review",
+					},
+					queueConsumers: {
+						"pr-bot-review": {
+							maxBatchSize: 10,
+							maxBatchTimeout: 5,
+						},
 					},
 				},
 			},

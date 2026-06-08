@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { handleReviewQueue } from "./queue";
 import { handleGitHubWebhook } from "./webhook";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -14,4 +15,7 @@ app.post("/webhook", async (c) => {
 	}
 });
 
-export default app;
+export default {
+	fetch: app.fetch,
+	queue: handleReviewQueue,
+};

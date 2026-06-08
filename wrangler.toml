@@ -1,0 +1,16 @@
+compatibility_date = "2025-10-08"
+main = "src/index.ts"
+name = "pr-bot"
+upload_source_maps = true
+
+[observability]
+enabled = true
+
+[[queues.producers]]
+binding = "REVIEW_QUEUE"
+queue = "pr-bot-review"
+
+[[queues.consumers]]
+queue = "pr-bot-review"
+max_batch_size = 10
+max_batch_timeout = 5
